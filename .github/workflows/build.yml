@@ -1,0 +1,29 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Test
+        run: dotnet test
+      - name: Package
+        run: |
+          dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o artifacts/Jelly2FA_0.0.1.0
+          rm -f artifacts/Jelly2FA_0.0.1.0/*.deps.json
+          (cd artifacts && zip -r jelly2fa_0.0.1.0.zip Jelly2FA_0.0.1.0)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jelly2fa_0.0.1.0
+          path: artifacts/jelly2fa_0.0.1.0.zip

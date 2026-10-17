@@ -1,0 +1,81 @@
+# Example nginx site for Jellyfin + Jelly2FA (based on the official Jellyfin nginx example).
+# Replace jellyfin.example.ddns.net, the certificate paths and the upstream address.
+#
+# Jelly2FA relies on two things here:
+#   1. nginx connects to Jellyfin from an address listed in Jellyfin "Known proxies" (Dashboard > Networking)
+#      and/or the plugin's "Reverse proxy addresses".
+#   2. nginx always sends X-Forwarded-For (any forwarding header marks a request as proxied => 2FA).
+
+# Brute-force protection in front of Jellyfin (in addition to Jelly2FA's own throttling).
+limit_req_zone $binary_remote_addr zone=jellyfin_auth:10m rate=10r/m;
+
+# Mask secrets in access logs (ApiKey/api_key query parameters, legacy pw parameter).
+map $request_uri $jellyfin_loggable_uri {
+    default $request_uri;
+    "~*^(?<p>[^?]*)\?(.*)$" "$p?(query removed)";
+}
+log_format jellyfin_stripped '$remote_addr - $remote_user [$time_local] "$request_method $jellyfin_loggable_uri $server_protocol" $status $body_bytes_sent "$http_referer" "$http_user_agent"';
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name jellyfin.example.ddns.net;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name jellyfin.example.ddns.net;
+
+    ssl_certificate     /etc/letsencrypt/live/jellyfin.example.ddns.net/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/jellyfin.example.ddns.net/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    access_log /var/log/nginx/jellyfin.access.log jellyfin_stripped;
+
+    client_max_body_size 20M;
+
+    set $jellyfin http://192.168.1.20:8096;   # Jellyfin address as reached FROM nginx
+
+    # Obsolete login route that takes the password in the URL (?pw=). Jelly2FA enforces 2FA on it anyway,
+    # but blocking it keeps passwords out of every log.
+    location ~* ^/Users/[0-9a-f-]+/Authenticate$ {
+        return 404;
+    }
+
+    # Sign-in endpoints: rate limited.
+    location ~* ^/(Users/AuthenticateByName|Users/AuthenticateWithQuickConnect|QuickConnect/) {
+        limit_req zone=jellyfin_auth burst=10 nodelay;
+        limit_req_status 429;
+        proxy_pass $jellyfin;
+        include /etc/nginx/snippets/jellyfin-proxy-headers.conf;
+    }
+
+    location / {
+        proxy_pass $jellyfin;
+        include /etc/nginx/snippets/jellyfin-proxy-headers.conf;
+        proxy_buffering off;
+    }
+
+    location /socket {
+        proxy_pass $jellyfin;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        include /etc/nginx/snippets/jellyfin-proxy-headers.conf;
+    }
+}
+
+# --- /etc/nginx/snippets/jellyfin-proxy-headers.conf ---
+# proxy_set_header Host $host;
+# proxy_set_header X-Real-IP $remote_addr;
+# # nginx is the only proxy: overwrite (do not append to) any X-Forwarded-For sent by the client.
+# proxy_set_header X-Forwarded-For $remote_addr;
+# proxy_set_header X-Forwarded-Proto $scheme;
+# proxy_set_header X-Forwarded-Protocol $scheme;
+# proxy_set_header X-Forwarded-Host $http_host;

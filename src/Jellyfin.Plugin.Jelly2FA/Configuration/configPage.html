@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Jelly2FA</title>
+</head>
+<body>
+<div id="Jelly2FAConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div data-role="content">
+        <div class="content-primary">
+            <h2 class="sectionTitle">Jelly2FA</h2>
+            <p>Sign-ins through the reverse proxy (DDNS/nginx) need the password followed directly by an emailed 8-digit code.
+               Direct LAN/Tailscale sign-ins need the password only. API keys are not affected.</p>
+
+            <h3>Status</h3>
+            <div id="j2faStatus">Loading...</div>
+            <button is="emby-button" type="button" id="j2faRefresh" class="raised emby-button"><span>Refresh status</span></button>
+
+            <h3>Users</h3>
+            <p class="fieldDescription">Enrolling revokes all existing sessions of that user. Enroll yourself while connected over LAN/Tailscale.</p>
+            <div id="j2faUsers">Loading...</div>
+
+            <form id="j2faForm">
+                <h3>Email (SMTP, STARTTLS required)</h3>
+                <div class="inputContainer"><label class="inputLabel" for="SmtpHost">SMTP host</label><input id="SmtpHost" type="text" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="SmtpPort">SMTP port</label><input id="SmtpPort" type="number" min="1" max="65535" is="emby-input" /><div class="fieldDescription">Submission port with STARTTLS (usually 587). Implicit TLS (465) is not supported.</div></div>
+                <div class="inputContainer"><label class="inputLabel" for="SmtpUsername">SMTP user name</label><input id="SmtpUsername" type="text" is="emby-input" autocomplete="off" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="FromAddress">From address</label><input id="FromAddress" type="email" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="FromName">From name</label><input id="FromName" type="text" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="AdminAlertEmail">Administrator alert email</label><input id="AdminAlertEmail" type="email" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="ServerDisplayName">Server name in emails</label><input id="ServerDisplayName" type="text" is="emby-input" /></div>
+
+                <h3>Network</h3>
+                <div class="inputContainer"><label class="inputLabel" for="ProxyAddresses">Reverse proxy addresses</label><input id="ProxyAddresses" type="text" is="emby-input" /><div class="fieldDescription">IPs/CIDRs of nginx as seen by Jellyfin, comma separated. Jellyfin's "Known proxies" are always included. If no proxy is known, everyone needs 2FA (fail closed).</div></div>
+                <div class="inputContainer"><label class="inputLabel" for="TrustedDirectNetworks">Trusted direct networks</label><input id="TrustedDirectNetworks" type="text" is="emby-input" /><div class="fieldDescription">CIDRs whose DIRECT connections sign in with the password only. Default: Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48).</div></div>
+                <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="TrustJellyfinLocalNetworks" type="checkbox" is="emby-checkbox" /><span>Trust Jellyfin's LAN networks for direct connections</span></label></div>
+                <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="TrustLoopback" type="checkbox" is="emby-checkbox" /><span>Trust loopback (only if nginx is NOT on the Jellyfin host)</span></label></div>
+
+                <h3>Quick Connect</h3>
+                <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="AllowQuickConnect" type="checkbox" is="emby-checkbox" /><span>Allow Quick Connect for enrolled users (approval from an already signed-in device)</span></label></div>
+                <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="NotifyOnQuickConnect" type="checkbox" is="emby-checkbox" /><span>Email the user on every Quick Connect sign-in</span></label></div>
+
+                <h3>Limits</h3>
+                <div class="inputContainer"><label class="inputLabel" for="CodeLifetimeMinutes">Code lifetime (minutes, 1-60)</label><input id="CodeLifetimeMinutes" type="number" min="1" max="60" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="MaxCodeAttempts">Wrong code entries per code</label><input id="MaxCodeAttempts" type="number" min="1" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="MaxPendingPerUser">Pending codes per user</label><input id="MaxPendingPerUser" type="number" min="1" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="ResendCooldownSeconds">Resend cooldown (seconds)</label><input id="ResendCooldownSeconds" type="number" min="0" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="MaxEmailsPerUserPerHour">Code emails per user per hour</label><input id="MaxEmailsPerUserPerHour" type="number" min="1" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="MaxEmailsPerHourGlobal">Code emails per hour (server)</label><input id="MaxEmailsPerHourGlobal" type="number" min="1" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="MaxFailuresPerIp">Failed sign-ins per IP</label><input id="MaxFailuresPerIp" type="number" min="1" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="IpWindowMinutes">IP window (minutes)</label><input id="IpWindowMinutes" type="number" min="1" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="MaxFailuresPerUser">Failed sign-ins per user</label><input id="MaxFailuresPerUser" type="number" min="1" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="UserWindowMinutes">User window (minutes)</label><input id="UserWindowMinutes" type="number" min="1" is="emby-input" /></div>
+
+                <button is="emby-button" type="submit" class="raised button-submit block emby-button"><span>Save settings</span></button>
+            </form>
+
+            <h3>SMTP password</h3>
+            <p class="fieldDescription">Stored in the plugin data folder (mode 0600), never shown again. The environment variable JELLY2FA_SMTP_PASSWORD overrides it.</p>
+            <div class="inputContainer"><label class="inputLabel" for="SmtpPassword">New SMTP password</label><input id="SmtpPassword" type="password" is="emby-input" autocomplete="new-password" /></div>
+            <button is="emby-button" type="button" id="j2faSavePassword" class="raised emby-button"><span>Save SMTP password</span></button>
+
+            <h3>Test email</h3>
+            <div class="inputContainer"><label class="inputLabel" for="TestEmailTo">Recipient</label><input id="TestEmailTo" type="email" is="emby-input" /></div>
+            <button is="emby-button" type="button" id="j2faTestEmail" class="raised emby-button"><span>Send test email</span></button>
+        </div>
+    </div>
+    <script type="text/javascript">
+        (function () {
+            var pluginId = 'aeb8e07d-2227-4d18-ad2f-7f49c81db71b';
+            var page = document.querySelector('#Jelly2FAConfigPage');
+            var textFields = ['SmtpHost', 'SmtpUsername', 'FromAddress', 'FromName', 'AdminAlertEmail', 'ServerDisplayName', 'ProxyAddresses', 'TrustedDirectNetworks'];
+            var numberFields = ['SmtpPort', 'CodeLifetimeMinutes', 'MaxCodeAttempts', 'MaxPendingPerUser', 'ResendCooldownSeconds', 'MaxEmailsPerUserPerHour', 'MaxEmailsPerHourGlobal', 'MaxFailuresPerIp', 'IpWindowMinutes', 'MaxFailuresPerUser', 'UserWindowMinutes'];
+            var boolFields = ['TrustJellyfinLocalNetworks', 'TrustLoopback', 'AllowQuickConnect', 'NotifyOnQuickConnect'];
+
+            function esc(s) {
+                return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+                });
+            }
+
+            function post(path, body) {
+                return ApiClient.ajax({
+                    type: 'POST',
+                    url: ApiClient.getUrl(path),
+                    data: body === undefined ? undefined : JSON.stringify(body),
+                    contentType: 'application/json'
+                });
+            }
+
+            function errorText(err) {
+                if (err && typeof err.text === 'function') {
+                    return err.text().then(function (t) { return t || ('HTTP ' + err.status); });
+                }
+                return Promise.resolve(String(err && err.message ? err.message : err));
+            }
+
+            function fail(err) {
+                errorText(err).then(function (t) { Dashboard.alert({ message: t, title: 'Jelly2FA' }); });
+            }
+
+            function loadStatus() {
+                ApiClient.getJSON(ApiClient.getUrl('Jelly2FA/Status')).then(function (s) {
+                    var html = '<p><b>' + (s.Healthy ? 'Healthy' : 'PROBLEMS FOUND') + '</b> - enrolled users: ' + esc(s.EnrolledUsers) +
+                        ', proxy known: ' + (s.ProxyConfigured ? 'yes' : 'NO') + ', SMTP: ' + (s.SmtpConfigured ? 'configured' : 'NOT configured') +
+                        ', Quick Connect: ' + (s.QuickConnectEnabled ? 'on' : 'off') + '</p>';
+                    if (s.Problems.length) {
+                        html += '<ul style="color:#e57373">' + s.Problems.map(function (p) { return '<li>' + esc(p) + '</li>'; }).join('') + '</ul>';
+                    }
+                    if (s.Warnings.length) {
+                        html += '<ul style="color:#ffb74d">' + s.Warnings.map(function (p) { return '<li>' + esc(p) + '</li>'; }).join('') + '</ul>';
+                    }
+                    page.querySelector('#j2faStatus').innerHTML = html;
+                }, fail);
+            }
+
+            function loadUsers() {
+                ApiClient.getJSON(ApiClient.getUrl('Jelly2FA/Users')).then(function (users) {
+                    var rows = users.map(function (u) {
+                        var state = u.Enrolled ? (u.UsesJelly2FaProvider ? 'enrolled' : 'ENROLLED BUT PROVIDER CHANGED') : (u.UsesJelly2FaProvider ? 'PROVIDER SET, NOT ENROLLED' : 'not enrolled');
+                        return '<tr data-id="' + esc(u.UserId) + '">' +
+                            '<td>' + esc(u.Name) + (u.IsAdministrator ? ' (admin)' : '') + (u.HasPassword ? '' : ' (no password)') + '</td>' +
+                            '<td>' + esc(state) + '</td>' +
+                            '<td><input type="email" is="emby-input" class="j2faEmail" value="' + esc(u.Email) + '" /></td>' +
+                            '<td>' + (u.Enrolled && u.UsesJelly2FaProvider
+                                ? '<button is="emby-button" type="button" class="emby-button j2faUpdate">Save email</button> <button is="emby-button" type="button" class="emby-button j2faUnenroll">Unenroll</button>'
+                                : '<button is="emby-button" type="button" class="emby-button j2faEnroll">Enroll</button>' + (u.Enrolled || u.UsesJelly2FaProvider ? ' <button is="emby-button" type="button" class="emby-button j2faUnenroll">Unenroll</button>' : '')) +
+                            '</td></tr>';
+                    }).join('');
+                    page.querySelector('#j2faUsers').innerHTML = '<table class="detailTable"><thead><tr><th>User</th><th>State</th><th>Email</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+                }, fail);
+            }
+
+            function refresh() { loadStatus(); loadUsers(); }
+
+            page.querySelector('#j2faUsers').addEventListener('click', function (e) {
+                var btn = e.target.closest('button');
+                if (!btn) { return; }
+                var row = btn.closest('tr');
+                var id = row.getAttribute('data-id');
+                var email = row.querySelector('.j2faEmail').value.trim();
+                var action;
+                if (btn.classList.contains('j2faEnroll')) {
+                    if (!confirm('Enroll this user? All existing sessions of the user will be signed out.')) { return; }
+                    action = post('Jelly2FA/Users/' + id + '/Enroll', { Email: email });
+                } else if (btn.classList.contains('j2faUpdate')) {
+                    action = post('Jelly2FA/Users/' + id + '/Email', { Email: email });
+                } else if (btn.classList.contains('j2faUnenroll')) {
+                    if (!confirm('Unenroll this user? The user will sign in with the password only, also remotely.')) { return; }
+                    action = post('Jelly2FA/Users/' + id + '/Unenroll');
+                } else { return; }
+                action.then(refresh, fail);
+            });
+
+            page.addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    textFields.forEach(function (f) { page.querySelector('#' + f).value = config[f] || ''; });
+                    numberFields.forEach(function (f) { page.querySelector('#' + f).value = config[f]; });
+                    boolFields.forEach(function (f) { page.querySelector('#' + f).checked = !!config[f]; });
+                    Dashboard.hideLoadingMsg();
+                    refresh();
+                }, function (err) { Dashboard.hideLoadingMsg(); fail(err); });
+            });
+
+            page.querySelector('#j2faRefresh').addEventListener('click', refresh);
+
+            page.querySelector('#j2faForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                Dashboard.showLoadingMsg();
+                // Re-read the config so the enrolled-user list (managed by the API) is never overwritten with stale data.
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    textFields.forEach(function (f) { config[f] = page.querySelector('#' + f).value.trim(); });
+                    numberFields.forEach(function (f) { config[f] = parseInt(page.querySelector('#' + f).value, 10) || 0; });
+                    boolFields.forEach(function (f) { config[f] = page.querySelector('#' + f).checked; });
+                    return ApiClient.updatePluginConfiguration(pluginId, config);
+                }).then(function (result) {
+                    Dashboard.processPluginConfigurationUpdateResult(result);
+                    refresh();
+                }, function (err) { Dashboard.hideLoadingMsg(); fail(err); });
+                return false;
+            });
+
+            page.querySelector('#j2faSavePassword').addEventListener('click', function () {
+                var input = page.querySelector('#SmtpPassword');
+                post('Jelly2FA/Smtp/Password', { Password: input.value }).then(function () {
+                    input.value = '';
+                    Dashboard.alert({ message: 'SMTP password saved.', title: 'Jelly2FA' });
+                    refresh();
+                }, fail);
+            });
+
+            page.querySelector('#j2faTestEmail').addEventListener('click', function () {
+                post('Jelly2FA/TestEmail', { Email: page.querySelector('#TestEmailTo').value.trim() }).then(function () {
+                    Dashboard.alert({ message: 'Test email sent.', title: 'Jelly2FA' });
+                    refresh();
+                }, fail);
+            });
+        })();
+    </script>
+</div>
+</body>
+</html>
