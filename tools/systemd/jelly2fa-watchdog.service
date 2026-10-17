@@ -1,0 +1,10 @@
+[Unit]
+Description=Jelly2FA watchdog (alerts when Jellyfin or the Jelly2FA plugin is down)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/jelly2fa-watchdog
+ExecStart=/usr/local/bin/jelly2fa-watchdog.sh
+# The script exits 1 when unhealthy; that is expected and not a unit failure worth restarting.
+SuccessExitStatus=1
