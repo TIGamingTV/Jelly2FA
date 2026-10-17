@@ -58,7 +58,7 @@ jobs:
       - name: Package
         env:
           VERSION: ${{ steps.v.outputs.version }}
-          ZIP: ${{ steps.v.outputs.zip }}
+          ZIP_NAME: ${{ steps.v.outputs.zip }}
           TIMESTAMP: ${{ steps.v.outputs.timestamp }}
         run: |
           OUT="artifacts/Jelly2FA_$VERSION"
@@ -68,20 +68,20 @@ jobs:
           jq --arg v "$VERSION" --arg t "$TIMESTAMP" '.version = $v | .timestamp = $t' \
             "$META" > "$OUT/meta.json"
           # Jellyfin extracts the zip straight into the plugin folder: files must be at the root.
-          (cd "$OUT" && zip -r "../$ZIP" .)
-          unzip -l "artifacts/$ZIP"
-          echo "MD5=$(md5sum "artifacts/$ZIP" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          (cd "$OUT" && zip -r "../$ZIP_NAME" .)
+          unzip -l "artifacts/$ZIP_NAME"
+          echo "MD5=$(md5sum "artifacts/$ZIP_NAME" | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          ZIP: ${{ steps.v.outputs.zip }}
+          ZIP_NAME: ${{ steps.v.outputs.zip }}
           CHANGELOG: ${{ steps.v.outputs.changelog }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "artifacts/$ZIP" --clobber
+            gh release upload "$TAG" "artifacts/$ZIP_NAME" --clobber
           else
-            gh release create "$TAG" "artifacts/$ZIP" --title "Jelly2FA $TAG" \
+            gh release create "$TAG" "artifacts/$ZIP_NAME" --title "Jelly2FA $TAG" \
               --notes "$CHANGELOG"$'\n\nMD5: `'"$MD5"'`'
           fi
 
@@ -93,7 +93,7 @@ jobs:
       - name: Update manifest.json on main
         env:
           VERSION: ${{ steps.v.outputs.version }}
-          ZIP: ${{ steps.v.outputs.zip }}
+          ZIP_NAME: ${{ steps.v.outputs.zip }}
           TIMESTAMP: ${{ steps.v.outputs.timestamp }}
           CHANGELOG: ${{ steps.v.outputs.changelog }}
         working-directory: repo-main
@@ -102,7 +102,7 @@ jobs:
             --manifest manifest.json \
             --meta "../$META" \
             --version "$VERSION" \
-            --source-url "https://github.com/${{ github.repository }}/releases/download/$TAG/$ZIP" \
+            --source-url "https://github.com/${{ github.repository }}/releases/download/$TAG/$ZIP_NAME" \
             --checksum "$MD5" \
             --timestamp "$TIMESTAMP" \
             --changelog "$CHANGELOG"
