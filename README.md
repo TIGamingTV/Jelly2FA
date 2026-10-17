@@ -47,15 +47,19 @@ Administrators are treated exactly like everyone else. **API keys keep working a
 
 ## Installation
 
-1. Build it (or download the CI artifact):
-   ```sh
-   dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o out/Jelly2FA_0.0.1.0
-   ```
-2. Copy the folder `Jelly2FA_0.0.1.0` (it contains `Jellyfin.Plugin.Jelly2FA.dll` and `meta.json`) into Jellyfin's `plugins` directory, for example `/var/lib/jellyfin/plugins/` or `/config/plugins/` in Docker. Then restart Jellyfin.
-3. Configure the Jellyfin networking settings below.
-4. Open **Dashboard → Plugins → Jelly2FA** and configure SMTP. Save the SMTP password with its own button; it is stored in `plugins/Jellyfin.Plugin.Jelly2FA/secrets.json` with mode 0600, or comes from the environment variable `JELLY2FA_SMTP_PASSWORD`. Then send a test email.
-5. **While connected over LAN or Tailscale**, enroll each user, including admins, with their email address. Enrolling signs out all existing sessions of that user except the one you are using.
-6. Check that the status box on the plugin page says *Healthy*.
+1. Install the plugin, either:
+   - **From the plugin repository (recommended):** in **Dashboard → Plugins → Repositories**, add
+     `https://raw.githubusercontent.com/TIGamingTV/Jelly2FA/main/manifest.json`.
+     Then install **Jelly2FA** from the **Catalog** (category *Authentication*) and restart Jellyfin.
+   - **Manually:** build it (or download the zip from a GitHub release):
+     ```sh
+     dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o out/Jelly2FA_0.0.1.0
+     ```
+     Copy the folder `Jelly2FA_0.0.1.0` (it contains `Jellyfin.Plugin.Jelly2FA.dll` and `meta.json`) into Jellyfin's `plugins` directory, for example `/var/lib/jellyfin/plugins/` or `/config/plugins/` in Docker. Then restart Jellyfin.
+2. Configure the Jellyfin networking settings below.
+3. Open **Dashboard → Plugins → Jelly2FA** and configure SMTP. Save the SMTP password with its own button; it is stored in `plugins/Jellyfin.Plugin.Jelly2FA/secrets.json` with mode 0600, or comes from the environment variable `JELLY2FA_SMTP_PASSWORD`. Then send a test email.
+4. **While connected over LAN or Tailscale**, enroll each user, including admins, with their email address. Enrolling signs out all existing sessions of that user except the one you are using.
+5. Check that the status box on the plugin page says *Healthy*.
 
 ### Jellyfin networking settings (Dashboard → Networking)
 
@@ -153,6 +157,13 @@ The end-to-end suite runs against the real Jellyfin 12.2 server, with 127.0.0.1 
 - admins via the proxy; the legacy and lowercase routes;
 - API keys (header and `?ApiKey=`); Quick Connect (allowed, notified, disabled);
 - fail closed without a proxy; password change; throttling without account lockout.
+
+### Releasing
+
+1. Update `version` and `changelog` in `src/Jellyfin.Plugin.Jelly2FA/meta.json`.
+2. Tag and push: `git tag v0.0.2.0 && git push origin v0.0.2.0`.
+
+The `release` workflow runs the tests, builds `jelly2fa_<version>.zip`, attaches it to a GitHub release, and adds the version (with its MD5 checksum) to `manifest.json` on `main`. Jellyfin reads that file as the plugin repository. If `main` is branch-protected, allow `github-actions[bot]` to push to it.
 
 ## License
 
