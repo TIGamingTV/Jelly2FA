@@ -1,6 +1,6 @@
-import os
+import email, email.header, glob, json, os, re, time, urllib.error, urllib.request
+
 WORK = os.environ.get("J2FA_E2E_DIR", "/tmp/j2fa")
-import json, urllib.request, urllib.error, glob, os, re, email, time
 
 def auth_header(token=None, device_id="e2e-device-1", client="E2E Client", device="E2E Device", version="1.0"):
     v = f'MediaBrowser Client="{client}", Device="{device}", DeviceId="{device_id}", Version="{version}"'
@@ -23,13 +23,29 @@ def call(method, url, body=None, token=None, headers=None, device_id="e2e-device
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
 
+def _part_text(part):
+    raw = part.get_payload(decode=True)
+    if raw is None:
+        return ""
+    return raw.decode(part.get_content_charset() or "utf-8", errors="replace")
+
 def mails(outdir=os.path.join(WORK, "mail")):
+    """(path, To, Subject, plain-text body, html body or None) per stored message.
+    Code emails are multipart/alternative (text + HTML); alerts are single-part text."""
     out = []
     for p in sorted(glob.glob(os.path.join(outdir, "*.eml"))):
         msg = email.message_from_bytes(open(p, "rb").read())
-        body = msg.get_payload(decode=True)
-        body = body.decode(errors="replace") if body else str(msg.get_payload())
-        out.append((p, msg["To"], msg["Subject"], body))
+        text, html = None, None
+        for part in msg.walk():
+            if part.is_multipart():
+                continue
+            ctype = part.get_content_type()
+            if ctype == "text/plain" and text is None:
+                text = _part_text(part)
+            elif ctype == "text/html" and html is None:
+                html = _part_text(part)
+        subject = str(email.header.make_header(email.header.decode_header(msg["Subject"] or "")))
+        out.append((p, msg["To"], subject, text or "", html))
     return out
 
 def wait_mail(count_before, timeout=15):
