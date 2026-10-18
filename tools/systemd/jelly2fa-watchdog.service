@@ -1,10 +1,22 @@
 [Unit]
 Description=Jelly2FA watchdog (alerts when Jellyfin or the Jelly2FA plugin is down)
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Runs unprivileged. Create the account once:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin jelly2fa-watchdog
+# (A static user rather than DynamicUser=, because DynamicUser= implies sandboxing that can break
+# setgid mail submission such as postfix's sendmail/postdrop.)
+User=jelly2fa-watchdog
+Group=jelly2fa-watchdog
+# Creates /var/lib/jelly2fa-watchdog owned by the user (the script's default STATE_FILE location).
+StateDirectory=jelly2fa-watchdog
+StateDirectoryMode=0700
 EnvironmentFile=-/etc/default/jelly2fa-watchdog
 ExecStart=/usr/local/bin/jelly2fa-watchdog.sh
 # The script exits 1 when unhealthy; that is expected and not a unit failure worth restarting.
 SuccessExitStatus=1
+PrivateTmp=yes
+ProtectHome=yes
