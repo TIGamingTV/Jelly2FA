@@ -23,6 +23,7 @@
     "description": "Requires an emailed one-time code (typed directly after the password) for sign-ins that arrive through the reverse proxy. Direct LAN/Tailscale sign-ins use the password only. No client changes needed.",
     "overview": "Email-code two-factor authentication for remote sign-ins",
     "owner": "TIGamingTV",
-    "category": "Authentication"
+    "category": "Authentication",
+    "imageUrl": "https://raw.githubusercontent.com/TIGamingTV/Jelly2FA/main/Jelly2FA.PNG"
   }
 ]
