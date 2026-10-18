@@ -97,7 +97,7 @@ public sealed class TokenWatcher : IEventConsumer<AuthenticationResultEventArgs>
                         user.Username,
                         eventArgs.SessionInfo?.DeviceName,
                         eventArgs.SessionInfo?.Client,
-                        http?.Connection.RemoteIpAddress?.ToString());
+                        IpUtil.Normalize(http?.Connection.RemoteIpAddress));
                 }
 
                 return;
@@ -112,7 +112,7 @@ public sealed class TokenWatcher : IEventConsumer<AuthenticationResultEventArgs>
         _notifications.AlertAdmin(
             "unexpected-token",
             "unexpected token revoked",
-            $"A token for user '{user.Username}' was created without passing Jelly2FA (request: {http?.Request.Path.Value ?? "none"}, device: {eventArgs.SessionInfo?.DeviceName}). It was revoked. Check for plugins that sign users in directly (e.g. SSO).");
+            $"A token for user '{user.Username}' was created without passing Jelly2FA (request: {EmailAddress.SingleLine(http?.Request.Path.Value ?? "none")}, device: {EmailAddress.SingleLine(eventArgs.SessionInfo?.DeviceName)}). It was revoked. Check for plugins that sign users in directly (e.g. SSO).");
     }
 
     private async Task RevokeAsync(Guid userId, string? deviceId)

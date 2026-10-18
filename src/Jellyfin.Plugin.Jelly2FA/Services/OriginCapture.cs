@@ -96,7 +96,8 @@ public sealed class OriginCaptureMiddleware
 }
 
 /// <summary>
-/// Inserts <see cref="OriginCaptureMiddleware"/> in front of Jellyfin's pipeline (before UseForwardedHeaders).
+/// Inserts <see cref="OriginCaptureMiddleware"/> in front of Jellyfin's pipeline (before UseForwardedHeaders),
+/// followed by <see cref="PluginStateMiddleware"/> (reacts to Disable/Enable of this plugin).
 /// </summary>
 public sealed class OriginCaptureStartupFilter : IStartupFilter
 {
@@ -106,6 +107,7 @@ public sealed class OriginCaptureStartupFilter : IStartupFilter
         return app =>
         {
             app.UseMiddleware<OriginCaptureMiddleware>();
+            app.UseMiddleware<PluginStateMiddleware>();
             next(app);
         };
     }

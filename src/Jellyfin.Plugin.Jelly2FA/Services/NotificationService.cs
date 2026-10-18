@@ -43,6 +43,9 @@ public interface INotificationService
 /// </summary>
 public sealed class NotificationService : INotificationService
 {
+    /// <summary>Maximum length of client-supplied text (device/app name) in user emails.</summary>
+    internal const int MaxClientTextLength = 64;
+
     private readonly EmailQueue _queue;
     private readonly IConfigProvider _config;
     private readonly RateLimiter _limiter;
@@ -143,9 +146,9 @@ public sealed class NotificationService : INotificationService
         var validity = string.Format(CultureInfo.InvariantCulture, t.Validity, lifetimeMinutes);
         var details = new (string Label, string Value)[]
         {
-            (t.Device, Clean(device, t)),
-            (t.App, Clean(client, t)),
-            (t.Ip, Clean(clientIp, t)),
+            (t.Device, Client(device, t)),
+            (t.App, Client(client, t)),
+            (t.Ip, Client(clientIp, t)),
             (t.Time, time),
         };
 
@@ -225,9 +228,9 @@ public sealed class NotificationService : INotificationService
             .AppendLine()
             .AppendLine(string.Format(CultureInfo.InvariantCulture, t.QcIntro, server))
             .AppendLine()
-            .AppendLine(CultureInfo.InvariantCulture, $"{(t.Device + ":").PadRight(8)}{Clean(device, t)}")
-            .AppendLine(CultureInfo.InvariantCulture, $"{(t.App + ":").PadRight(8)}{Clean(client, t)}")
-            .AppendLine(CultureInfo.InvariantCulture, $"{t.ApprovedFromIp}: {Clean(approverIp, t)}")
+            .AppendLine(CultureInfo.InvariantCulture, $"{(t.Device + ":").PadRight(8)}{Client(device, t)}")
+            .AppendLine(CultureInfo.InvariantCulture, $"{(t.App + ":").PadRight(8)}{Client(client, t)}")
+            .AppendLine(CultureInfo.InvariantCulture, $"{t.ApprovedFromIp}: {Client(approverIp, t)}")
             .AppendLine(CultureInfo.InvariantCulture, $"{(t.Time + ":").PadRight(8)}{now.UtcDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)} UTC")
             .AppendLine()
             .AppendLine(t.QcWarning)
@@ -241,6 +244,16 @@ public sealed class NotificationService : INotificationService
     {
         var s = EmailAddress.SingleLine(value);
         return s.Length == 0 ? t.Unknown : s;
+    }
+
+    /// <summary>
+    /// Client-supplied values (device/app name, IP text). Whoever triggers the email chooses them, so they are
+    /// kept short to limit how much attacker-controlled text ends up in a trusted-looking email.
+    /// </summary>
+    private static string Client(string? value, Texts t)
+    {
+        var s = Clean(value, t);
+        return s.Length > MaxClientTextLength ? s[..(MaxClientTextLength - 3)].TrimEnd() + "..." : s;
     }
 
     private sealed class Texts

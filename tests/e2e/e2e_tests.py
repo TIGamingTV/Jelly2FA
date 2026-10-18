@@ -1,5 +1,7 @@
-import threading, time
+import subprocess, threading, time
 from jfapi import *  # noqa: F403 (provides WORK, call, mails, ...)
+
+DB = os.path.join(WORK, "jf", "data", "data", "jellyfin.db")
 
 PROXY = "http://127.0.0.1:8096"        # peer 127.0.0.1 == Jellyfin KnownProxy (emulates nginx)
 LAN = os.environ.get("J2FA_E2E_LAN_URL", "http://172.19.0.1:8096")  # direct (non-proxied) connection from a LAN address
@@ -177,6 +179,60 @@ s, u = call("GET", PROXY + f"/Users/{ALICE}", token=T)
 check("brute force: account not disabled (lockout off)", s == 200 and not u["Policy"]["IsDisabled"])
 check("brute force: existing session still valid", call("GET", PROXY + "/Users/Me", token=alice_token, device_id="dev-A", headers=XFF)[0] == 200)
 check("other IP not throttled by that IP (user window still allows)", login(PROXY, "alice", "AlicePass2!", "dev-other", {"X-Forwarded-For": "198.51.100.8"})[0] in (403, 401))
+
+# --- 18. remote failures must not lock the user out of the LAN (per-user throttle applies to the proxy only)
+plugin_cfg(MaxFailuresPerUser=5)   # alice already has 12 recent failures from section 17
+s, _ = login(PROXY, "alice", "AlicePass2!", "dev-thr", {"X-Forwarded-For": "198.51.100.20"})
+check("per-user throttle hit via proxy -> 403", s == 403, s)
+check("same user, direct LAN -> 200 (not blocked by remote failures)", login(LAN, "alice", "AlicePass2!", "dev-lan-thr")[0] == 200)
+plugin_cfg(MaxFailuresPerUser=30)
+
+# --- 19. unenroll after failures: Jellyfin's default lockout returns, but old failures must not disable the account
+def db(q):
+    return subprocess.run(["sqlite3", "-readonly", DB, q], capture_output=True, text=True).stdout.strip()
+for i in range(4):  # the provider rejects; Jellyfin counts these failures even while its lockout is off
+    login(LAN, "alice", "bad-%d" % i, "dev-cnt")
+before = int(db(f"SELECT InvalidLoginAttemptCount FROM Users WHERE Username='alice'") or 0)
+check("precondition: Jellyfin counted >= 3 failures while enrolled", before >= 3, before)
+check("unenroll alice -> 204", call("POST", f"{PROXY}/Jelly2FA/Users/{ALICE}/Unenroll", token=T)[0] == 204)
+s, u = call("GET", PROXY + f"/Users/{ALICE}", token=T)
+check("unenrolled: default provider, Jellyfin's default lockout", u["Policy"]["AuthenticationProviderId"].endswith("DefaultAuthenticationProvider")
+      and u["Policy"]["LoginAttemptsBeforeLockout"] != -1, u["Policy"]["LoginAttemptsBeforeLockout"])
+check("unenrolled: failed-login counter reset", db("SELECT InvalidLoginAttemptCount FROM Users WHERE Username='alice'") == "0")
+check("unenrolled: one wrong password -> 401", login(PROXY, "alice", "bad", "dev-un", XFF)[0] == 401)
+s, u = call("GET", PROXY + f"/Users/{ALICE}", token=T)
+check("unenrolled: account NOT disabled by one wrong password", not u["Policy"]["IsDisabled"])
+check("unenrolled: password only via proxy -> 200", login(PROXY, "alice", "AlicePass2!", "dev-un", XFF)[0] == 200)
+check("re-enroll alice -> 204", call("POST", f"{PROXY}/Jelly2FA/Users/{ALICE}/Enroll", {"Email": "alice@example.test"}, token=T)[0] == 204)
+check("re-enrolled: password only via proxy -> 403", login(PROXY, "alice", "AlicePass2!", "dev-re", XFF)[0] == 403)
+
+# --- 20. optional code-only second step (bound to the client IP that requested the code)
+plugin_cfg(AllowCodeOnlySecondStep=True)
+def fresh_code(ip, dev):
+    n = len(mails())
+    s, _ = login(PROXY, "alice", "AlicePass2!", dev, {"X-Forwarded-For": ip})
+    new = [m for m in wait_mail(n) if "sign-in code" in m[2] and ip in m[3]]
+    return s, (code_from(new[-1][3]) if new else None), (new[-1] if new else None)
+s, c1, m1 = fresh_code("203.0.113.61", "dev-co")
+check("code-only: first step -> 403 + code", s == 403 and c1, s)
+check("code-only: email explains code-only entry", m1 and "only this code" in m1[3])
+check("code-only: code alone from another IP -> 401", login(PROXY, "alice", c1, "dev-co", {"X-Forwarded-For": "203.0.113.62"})[0] == 401)
+check("code-only: code alone from the requesting IP -> 200", login(PROXY, "alice", c1, "dev-co", {"X-Forwarded-For": "203.0.113.61"})[0] == 200)
+s, c2, _ = fresh_code("203.0.113.63", "dev-co2")
+check("code-only: password + code still works -> 200", c2 and login(PROXY, "alice", "AlicePass2!" + c2, "dev-co2", {"X-Forwarded-For": "203.0.113.63"})[0] == 200)
+plugin_cfg(AllowCodeOnlySecondStep=False)
+s, c3, _ = fresh_code("203.0.113.64", "dev-co3")
+check("code-only off: code alone -> 401", c3 and login(PROXY, "alice", c3, "dev-co3", {"X-Forwarded-For": "203.0.113.64"})[0] == 401)
+
+# --- 21. config robustness: a posted config with Users=null must not break sign-in or status
+s, c = call("GET", f"{PROXY}/Plugins/{PID}/Configuration", token=T)
+saved_users = c["Users"]
+c["Users"] = None
+call("POST", f"{PROXY}/Plugins/{PID}/Configuration", c, token=T)
+check("Users=null: status endpoint still answers", call("GET", PROXY + "/Jelly2FA/Status", token=T)[0] == 200)
+check("Users=null: enrolled-provider user refused remotely (403), no crash", login(PROXY, "alice", "AlicePass2!", "dev-null", XFF)[0] == 403)
+c["Users"] = saved_users
+call("POST", f"{PROXY}/Plugins/{PID}/Configuration", c, token=T)
 
 print()
 print(f"{sum(1 for _, ok in results if ok)}/{len(results)} passed")

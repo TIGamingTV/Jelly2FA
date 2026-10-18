@@ -165,6 +165,16 @@ public sealed class ChallengeStore
     /// <returns>True if pending.</returns>
     public bool HasPending(ChallengeBinding binding) => GetIssuedAt(binding) is not null;
 
+    /// <summary>Drops the pending code of one binding (e.g. the code email could not be queued).</summary>
+    /// <param name="binding">Binding.</param>
+    public void Remove(ChallengeBinding binding)
+    {
+        lock (_lock)
+        {
+            _entries.Remove(binding.Key);
+        }
+    }
+
     /// <summary>Drops every pending code of a user (password change, unenroll, deletion).</summary>
     /// <param name="userId">User id.</param>
     public void RemoveUser(Guid userId)

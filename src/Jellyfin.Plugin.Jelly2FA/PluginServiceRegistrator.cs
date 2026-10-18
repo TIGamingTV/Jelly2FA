@@ -35,7 +35,10 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<EmailQueue>();
         serviceCollection.AddSingleton<IHostedService>(sp => sp.GetRequiredService<EmailQueue>());
         serviceCollection.AddSingleton<INotificationService, NotificationService>();
+        serviceCollection.AddSingleton<SuspensionStore>();
         serviceCollection.AddSingleton<EnrollmentService>();
+        serviceCollection.AddSingleton<PluginStateService>();
+        serviceCollection.AddHostedService<ReactivationStartupService>();
         serviceCollection.AddSingleton<HealthService>();
         serviceCollection.AddHostedService<SelfCheckService>();
 

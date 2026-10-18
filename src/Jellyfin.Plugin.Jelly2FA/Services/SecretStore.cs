@@ -15,6 +15,9 @@ public sealed class SecretStore
     /// <summary>Environment variable that overrides the stored password.</summary>
     public const string EnvironmentVariable = "JELLY2FA_SMTP_PASSWORD";
 
+    /// <summary>Name of the secrets file in the plugin data folder.</summary>
+    public const string FileName = "secrets.json";
+
     private readonly object _lock = new();
     private readonly ILogger<SecretStore> _logger;
     private readonly Func<string?> _folder;
@@ -77,7 +80,10 @@ public sealed class SecretStore
             var tmp = path + ".tmp";
             var json = JsonSerializer.Serialize(new Secrets { SmtpPassword = password ?? string.Empty });
 
-            var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write, Share = FileShare.None };
+            // A leftover temp file may have other permissions (the mode below only applies to NEW files):
+            // remove it and require creating a fresh file, so the password is never written into it.
+            File.Delete(tmp);
+            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
             if (!OperatingSystem.IsWindows())
             {
                 options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
@@ -102,6 +108,22 @@ public sealed class SecretStore
         }
     }
 
+    /// <summary>Deletes the stored secrets (plugin uninstall). The environment variable is not affected.</summary>
+    /// <param name="folder">Plugin data folder.</param>
+    /// <returns>True if nothing is left behind.</returns>
+    public static bool DeleteFiles(string? folder)
+    {
+        if (string.IsNullOrEmpty(folder))
+        {
+            return true;
+        }
+
+        var path = Path.Combine(folder, FileName);
+        File.Delete(path);
+        File.Delete(path + ".tmp");
+        return !File.Exists(path);
+    }
+
     private Secrets? Load()
     {
         var path = GetPath();
@@ -124,7 +146,7 @@ public sealed class SecretStore
     private string? GetPath()
     {
         var folder = _folder();
-        return folder is null ? null : Path.Combine(folder, "secrets.json");
+        return folder is null ? null : Path.Combine(folder, FileName);
     }
 
     private sealed class Secrets

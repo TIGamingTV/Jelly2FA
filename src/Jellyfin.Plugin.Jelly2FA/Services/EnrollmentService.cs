@@ -20,6 +20,7 @@ public sealed class EnrollmentService
     private readonly ISessionManager _sessionManager;
     private readonly IConfigProvider _config;
     private readonly ChallengeStore _challenges;
+    private readonly SuspensionStore _suspension;
     private readonly ILogger<EnrollmentService> _logger;
 
     /// <summary>
@@ -29,13 +30,15 @@ public sealed class EnrollmentService
     /// <param name="sessionManager">Session manager.</param>
     /// <param name="config">Config.</param>
     /// <param name="challenges">Code store.</param>
+    /// <param name="suspension">Suspension store (plugin disabled).</param>
     /// <param name="logger">Logger.</param>
-    public EnrollmentService(IUserManager userManager, ISessionManager sessionManager, IConfigProvider config, ChallengeStore challenges, ILogger<EnrollmentService> logger)
+    public EnrollmentService(IUserManager userManager, ISessionManager sessionManager, IConfigProvider config, ChallengeStore challenges, SuspensionStore suspension, ILogger<EnrollmentService> logger)
     {
         _userManager = userManager;
         _sessionManager = sessionManager;
         _config = config;
         _challenges = challenges;
+        _suspension = suspension;
         _logger = logger;
     }
 
@@ -56,6 +59,12 @@ public sealed class EnrollmentService
             throw new ArgumentException("Invalid email address.", nameof(email));
         }
 
+        if (_suspension.IsSuspended)
+        {
+            // After the pending restart the plugin is not loaded; a user on its provider could not sign in at all.
+            throw new InvalidOperationException("Jelly2FA is disabled. Enable the plugin (and restart Jellyfin) before enrolling users.");
+        }
+
         var user = _userManager.GetUserById(userId) ?? throw new KeyNotFoundException("User not found.");
         if (string.IsNullOrEmpty(user.Password))
         {
@@ -63,13 +72,7 @@ public sealed class EnrollmentService
         }
 
         SetEmail(userId, email);
-
-        var policy = _userManager.GetUserDto(user).Policy;
-        policy.AuthenticationProviderId = ProviderIds.Jelly2Fa;
-        policy.LoginAttemptsBeforeLockout = -1;
-        policy.InvalidLoginAttemptCount = 0;
-        await _userManager.UpdatePolicyAsync(userId, policy).ConfigureAwait(false);
-
+        await ProviderSwitch.ToJelly2FaAsync(_userManager, user).ConfigureAwait(false);
         await _sessionManager.RevokeUserTokens(userId, callerToken ?? null!).ConfigureAwait(false);
         _challenges.RemoveUser(userId);
         _logger.LogInformation("Jelly2FA: enrolled user {UserId}; existing tokens revoked", userId);
@@ -97,22 +100,16 @@ public sealed class EnrollmentService
 
     /// <summary>
     /// Unenrolls a user: back to Jellyfin's default password provider (password only everywhere) with
-    /// Jellyfin's default lockout.
+    /// Jellyfin's default lockout and a reset failed-login counter.
     /// </summary>
     /// <param name="userId">User id.</param>
     /// <returns>A task.</returns>
     public async Task UnenrollAsync(Guid userId)
     {
         var user = _userManager.GetUserById(userId) ?? throw new KeyNotFoundException("User not found.");
-        var policy = _userManager.GetUserDto(user).Policy;
-        if (string.Equals(policy.AuthenticationProviderId, ProviderIds.Jelly2Fa, StringComparison.Ordinal))
-        {
-            policy.AuthenticationProviderId = ProviderIds.Default;
-            policy.LoginAttemptsBeforeLockout = 0;
-            await _userManager.UpdatePolicyAsync(userId, policy).ConfigureAwait(false);
-        }
-
+        await ProviderSwitch.ToDefaultAsync(_userManager, user).ConfigureAwait(false);
         RemoveFromConfig(userId);
+        _suspension.Remove(userId);
         _challenges.RemoveUser(userId);
         _logger.LogWarning("Jelly2FA: user {UserId} unenrolled (password-only sign-in)", userId);
     }

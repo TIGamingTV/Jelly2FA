@@ -375,6 +375,134 @@ public class ProviderTests
     }
 
     [Fact]
+    public async Task RemoteFailures_DoNotLockUserOutOfLan()
+    {
+        // 10 wrong passwords through the proxy exhaust the per-user bucket...
+        for (var i = 0; i < 10; i++)
+        {
+            Request(ip: "203.0.113." + (10 + i));
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + i));
+        }
+
+        Request(ip: "203.0.113.99");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password)); // remote: throttled
+
+        // ...but a direct LAN sign-in still works (only the per-IP bucket applies there).
+        _trusted = true;
+        Request(ip: "192.168.1.50");
+        Assert.Equal("alice", (await Auth(Password)).Username);
+    }
+
+    [Fact]
+    public async Task LanFailures_ThrottledPerIp_NotPerUser()
+    {
+        _trusted = true;
+        for (var i = 0; i < 10; i++)
+        {
+            Request(ip: "192.168.1.50");
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + i));
+        }
+
+        Request(ip: "192.168.1.50");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password)); // that LAN IP is throttled
+
+        Request(ip: "192.168.1.51");
+        Assert.Equal("alice", (await Auth(Password)).Username); // the user is not
+    }
+
+    [Fact]
+    public async Task Ipv6_ThrottledPer64()
+    {
+        for (var i = 0; i < 10; i++)
+        {
+            Request(ip: "2001:db8:1:2::" + (i + 1).ToString("x", System.Globalization.CultureInfo.InvariantCulture));
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + i));
+        }
+
+        _config.MaxFailuresPerUser = 1000; // isolate the per-IP bucket
+        Request(ip: "2001:db8:1:2:ffff::1");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password)); // same /64
+        Request(ip: "2001:db8:1:3::1");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password)); // other /64: not throttled, code required
+        Assert.Single(_notifications.Codes);
+    }
+
+    [Fact]
+    public async Task ParallelWrongPasswords_CannotExceedTheLimit()
+    {
+        // Every attempt takes its slot before verifying, so concurrent attempts cannot all pass the check.
+        var provider = Provider();
+        var results = await Task.WhenAll(Enumerable.Range(0, 40).Select(i => Task.Run(async () =>
+        {
+            var ctx = new DefaultHttpContext();
+            ctx.Request.Method = "POST";
+            ctx.Request.Path = "/Users/AuthenticateByName";
+            ctx.Connection.RemoteIpAddress = IPAddress.Parse("203.0.113.5");
+            ctx.Items["dev"] = "dev-1";
+            OriginCaptureMiddleware.Set(ctx, new RequestOrigin(IPAddress.Parse("192.168.1.10"), true));
+            _accessor.HttpContext = ctx;
+            try
+            {
+                await provider.Authenticate("alice", "wrong" + i, _user);
+                return "ok";
+            }
+            catch (AuthenticationException)
+            {
+                return "401";
+            }
+            catch (SecurityException)
+            {
+                return "403";
+            }
+        })));
+
+        Assert.Equal(10, results.Count(r => r == "401"));
+        Assert.Equal(30, results.Count(r => r == "403"));
+    }
+
+    [Fact]
+    public async Task SuccessfulSignIns_DoNotUseUpTheLimit()
+    {
+        _trusted = true;
+        for (var i = 0; i < 25; i++)
+        {
+            Request(ip: "192.168.1.50");
+            await Auth(Password);
+        }
+
+        Request(ip: "192.168.1.50");
+        Assert.Equal("alice", (await Auth(Password)).Username);
+    }
+
+    [Fact]
+    public async Task CodeEmailNotQueued_NoPendingCode_RetrySendsAgain()
+    {
+        _notifications.Accept = false;
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Equal(0, _store.Count); // no code that nobody received
+
+        _notifications.Accept = true;
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password)); // no resend cooldown in the way
+        Assert.Equal(2, _notifications.Codes.Count);
+        Assert.Equal(1, _store.Count);
+    }
+
+    [Fact]
+    public async Task PasswordChangeCheck_IsThrottledPerUser()
+    {
+        for (var i = 0; i < 10; i++)
+        {
+            Request(path: "/Users/Password", authenticated: true);
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + i));
+        }
+
+        Request(path: "/Users/Password", authenticated: true);
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+    }
+
+    [Fact]
     public async Task ChangePassword_HashesAndDropsCodes()
     {
         Request();
@@ -409,10 +537,13 @@ internal sealed class FakeNotifications : INotificationService
 
     public List<string> QuickConnect { get; } = new();
 
+    /// <summary>Gets or sets a value indicating whether code emails are accepted (false = queue full).</summary>
+    public bool Accept { get; set; } = true;
+
     public bool SendCode(string email, string userName, string code, string? device, string? client, string? clientIp, int lifetimeMinutes)
     {
         Codes.Add(code);
-        return true;
+        return Accept;
     }
 
     public void NotifyQuickConnect(string email, string userName, string? device, string? client, string? approverIp) => QuickConnect.Add(email);

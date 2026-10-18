@@ -46,6 +46,9 @@ public sealed class StatusReport
 
     /// <summary>Gets or sets the number of enrolled users.</summary>
     public int EnrolledUsers { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether the plugin was disabled and users were handed back (2FA off).</summary>
+    public bool Disabled { get; set; }
 }
 
 /// <summary>Computes plugin health.</summary>
@@ -57,6 +60,7 @@ public sealed class HealthService
     private readonly IEmailSender _email;
     private readonly HealthState _state;
     private readonly IConfigProvider _config;
+    private readonly SuspensionStore _suspension;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HealthService"/> class.
@@ -67,8 +71,10 @@ public sealed class HealthService
     /// <param name="email">Email sender.</param>
     /// <param name="state">Health state.</param>
     /// <param name="config">Config.</param>
-    public HealthService(IUserManager userManager, IServerConfigurationManager serverConfig, IOriginClassifier origin, IEmailSender email, HealthState state, IConfigProvider config)
+    /// <param name="suspension">Suspension store (plugin disabled).</param>
+    public HealthService(IUserManager userManager, IServerConfigurationManager serverConfig, IOriginClassifier origin, IEmailSender email, HealthState state, IConfigProvider config, SuspensionStore suspension)
     {
+        _suspension = suspension;
         _userManager = userManager;
         _serverConfig = serverConfig;
         _origin = origin;
@@ -93,7 +99,14 @@ public sealed class HealthService
             LastSmtpFailure = _state.LastSmtpFailure,
             QuickConnectEnabled = _serverConfig.Configuration.QuickConnectAvailable,
             EnrolledUsers = config.Users.Length,
+            Disabled = _suspension.IsSuspended,
         };
+
+        var suspended = r.Disabled ? _suspension.Load().ToHashSet() : new HashSet<Guid>();
+        if (r.Disabled)
+        {
+            r.Warnings.Add($"Jelly2FA is disabled: {suspended.Count} user(s) sign in with the password only, also remotely. Enable the plugin to switch them back to two-factor sign-in.");
+        }
 
         if (!r.OriginCaptureActive)
         {
@@ -107,7 +120,14 @@ public sealed class HealthService
 
         if (r.JellyfinKnownProxies.Length == 0)
         {
-            r.Warnings.Add("Jellyfin 'Known proxies' is empty: Jellyfin sees every proxied client as the proxy IP (remote-access restrictions, logs and per-IP throttling are inaccurate).");
+            if (config.AllowCodeOnlySecondStep)
+            {
+                r.Problems.Add("'Allow the code alone as the second step' is on, but Jellyfin 'Known proxies' is empty: every remote client has the proxy's IP, so the IP binding of codes protects nothing. Set Known proxies or turn the option off.");
+            }
+            else
+            {
+                r.Warnings.Add("Jellyfin 'Known proxies' is empty: Jellyfin sees every proxied client as the proxy IP (remote-access restrictions, logs and per-IP throttling are inaccurate).");
+            }
         }
 
         if (!r.SmtpConfigured)
@@ -129,11 +149,16 @@ public sealed class HealthService
             r.Warnings.Add("No administrator alert email configured.");
         }
 
-        var enrolled = config.Users.ToDictionary(u => u.UserId);
+        var enrolled = config.Users.GroupBy(u => u.UserId).ToDictionary(g => g.Key, g => g.First());
         foreach (var user in _userManager.GetUsers())
         {
             var onProvider = string.Equals(user.AuthenticationProviderId, ProviderIds.Jelly2Fa, StringComparison.Ordinal);
             var isEnrolled = enrolled.TryGetValue(user.Id, out var entry);
+            if (isEnrolled && !onProvider && suspended.Contains(user.Id))
+            {
+                continue; // reported once above
+            }
+
             if (isEnrolled && !onProvider)
             {
                 r.Problems.Add($"User '{user.Username}' is enrolled but uses another authentication provider (NO 2FA). Re-enroll the user.");

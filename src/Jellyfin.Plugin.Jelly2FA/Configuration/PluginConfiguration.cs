@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using MediaBrowser.Model.Plugins;
 
 namespace Jellyfin.Plugin.Jelly2FA.Configuration;
@@ -104,6 +105,36 @@ public class PluginConfiguration : BasePluginConfiguration
 
     // ---- Enrollment ----
 
-    /// <summary>Gets or sets the enrolled users. Managed through the plugin page / API, not by hand.</summary>
-    public EnrolledUser[] Users { get; set; } = Array.Empty<EnrolledUser>();
+    /// <summary>
+    /// Gets or sets the enrolled users. Managed through the plugin page / API, not by hand.
+    /// Never null: null, null entries and duplicate user ids (e.g. from a hand-edited or API-posted
+    /// configuration) are normalised away; the first entry per user wins.
+    /// </summary>
+    public EnrolledUser[] Users
+    {
+        get => _users;
+        set => _users = Normalize(value);
+    }
+
+    private EnrolledUser[] _users = Array.Empty<EnrolledUser>();
+
+    private static EnrolledUser[] Normalize(EnrolledUser[]? value)
+    {
+        if (value is null || value.Length == 0)
+        {
+            return Array.Empty<EnrolledUser>();
+        }
+
+        var seen = new HashSet<Guid>();
+        var result = new List<EnrolledUser>(value.Length);
+        foreach (var user in value)
+        {
+            if (user is not null && user.UserId != Guid.Empty && seen.Add(user.UserId))
+            {
+                result.Add(user);
+            }
+        }
+
+        return result.ToArray();
+    }
 }

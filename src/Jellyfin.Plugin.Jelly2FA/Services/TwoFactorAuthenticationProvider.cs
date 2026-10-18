@@ -1,6 +1,6 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
-using System.Net;
 using System.Threading.Tasks;
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Authentication;
@@ -26,7 +26,8 @@ namespace Jellyfin.Plugin.Jelly2FA.Services;
 public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, IRequiresResolvedUser
 {
     private const string InvalidCredentials = "Invalid username or password.";
-    private const string UnknownIp = "unknown";
+    private const string Throttled = "Too many failed sign-in attempts. Try again later.";
+    private const string GlobalMailKey = "mail:global";
 
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly IServiceProvider _services;
@@ -119,19 +120,8 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
             _logger.LogWarning(
                 "Jelly2FA: denied password check for user {UserId} from an unexpected caller ({Path})",
                 resolvedUser.Id,
-                http?.Request.Path.Value ?? "(no HTTP request)");
+                EmailAddress.SingleLine(http?.Request.Path.Value ?? "(no HTTP request)"));
             throw new SecurityException("Jelly2FA: this sign-in method is not allowed.");
-        }
-
-        if (kind == LoginKind.PasswordCheck)
-        {
-            // Already-authenticated user confirming the current password (password change): password only.
-            if (!VerifyPassword(resolvedUser, password))
-            {
-                throw new AuthenticationException(InvalidCredentials);
-            }
-
-            return Success(username);
         }
 
         Configuration.PluginConfiguration config;
@@ -144,35 +134,55 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
             throw new SecurityException("Jelly2FA is not ready.");
         }
 
-        var clientIp = NormalizedIp(http.Connection.RemoteIpAddress);
-        var ipKey = "fail:ip:" + clientIp;
         var userKey = "fail:user:" + resolvedUser.Id.ToString("N", CultureInfo.InvariantCulture);
-        var ipWindow = TimeSpan.FromMinutes(Math.Max(1, config.IpWindowMinutes));
         var userWindow = TimeSpan.FromMinutes(Math.Max(1, config.UserWindowMinutes));
 
-        if (_limiter.IsLimited(ipKey, config.MaxFailuresPerIp, ipWindow)
-            || _limiter.IsLimited(userKey, config.MaxFailuresPerUser, userWindow))
+        if (kind == LoginKind.PasswordCheck)
         {
-            _logger.LogWarning("Jelly2FA: throttled sign-in for user {UserId} from {Ip}", resolvedUser.Id, clientIp);
-            throw new SecurityException("Too many failed sign-in attempts. Try again later.");
+            // Already-authenticated user confirming the current password (password change): password only,
+            // but throttled per user (Jellyfin's own lockout is off for enrolled users).
+            using var checkSlots = new FailureSlots(_limiter);
+            if (!checkSlots.TryTake(userKey, config.MaxFailuresPerUser, userWindow))
+            {
+                _logger.LogWarning("Jelly2FA: throttled password check for user {UserId}", resolvedUser.Id);
+                throw new SecurityException(Throttled);
+            }
+
+            if (!VerifyPassword(resolvedUser, password))
+            {
+                checkSlots.Commit();
+                throw new AuthenticationException(InvalidCredentials);
+            }
+
+            return Success(username);
         }
 
-        void RecordFailure()
+        var clientIp = IpUtil.Normalize(http.Connection.RemoteIpAddress);
+        var ipKey = "fail:ip:" + IpUtil.ThrottleKey(http.Connection.RemoteIpAddress);
+        var ipWindow = TimeSpan.FromMinutes(Math.Max(1, config.IpWindowMinutes));
+        var captured = OriginCaptureMiddleware.Get(http);
+        var origin = _originClassifier.Classify(captured);
+
+        // Every attempt takes a failure slot up front (atomically, so parallel requests cannot all pass the
+        // check) and gives it back unless it really failed. Direct LAN/Tailscale sign-ins are only throttled
+        // per IP: failures through the proxy must not be able to lock the user out of the LAN.
+        using var slots = new FailureSlots(_limiter);
+        if (!slots.TryTake(ipKey, config.MaxFailuresPerIp, ipWindow)
+            || (!origin.TrustedDirect && !slots.TryTake(userKey, config.MaxFailuresPerUser, userWindow)))
         {
-            _limiter.Record(ipKey, ipWindow);
-            _limiter.Record(userKey, userWindow);
+            _logger.LogWarning("Jelly2FA: throttled sign-in for user {UserId} from {Ip}", resolvedUser.Id, clientIp);
+            throw new SecurityException(Throttled);
         }
 
         var auth = await GetAuthorizationInfo(http).ConfigureAwait(false);
         var deviceId = auth.DeviceId;
         var client = auth.Client;
 
-        var origin = _originClassifier.Classify(OriginCaptureMiddleware.Get(http));
         if (origin.TrustedDirect)
         {
             if (!VerifyPassword(resolvedUser, password))
             {
-                RecordFailure();
+                slots.Commit();
                 throw new AuthenticationException(InvalidCredentials);
             }
 
@@ -181,7 +191,7 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
                 "Jelly2FA: password-only sign-in for user {UserId} ({Reason}, peer {Peer})",
                 resolvedUser.Id,
                 origin.Reason,
-                NormalizedIp(OriginCaptureMiddleware.Get(http)?.PeerAddress));
+                IpUtil.Normalize(captured?.PeerAddress));
             return Success(username);
         }
 
@@ -190,7 +200,7 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
             "Jelly2FA: two-factor required for user {UserId} ({Reason}, peer {Peer}, client ip {Ip})",
             resolvedUser.Id,
             origin.Reason,
-            NormalizedIp(OriginCaptureMiddleware.Get(http)?.PeerAddress),
+            IpUtil.Normalize(captured?.PeerAddress),
             clientIp);
 
         if (string.IsNullOrEmpty(deviceId) || string.IsNullOrEmpty(client))
@@ -235,7 +245,7 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
             }
 
             _logger.LogWarning("Jelly2FA: code-only entry rejected for user {UserId} from {Ip}: {Result}", resolvedUser.Id, clientIp, result);
-            RecordFailure();
+            slots.Commit();
             throw new AuthenticationException(InvalidCredentials);
         }
 
@@ -258,13 +268,13 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
                 _logger.LogWarning("Jelly2FA: code rejected for user {UserId} from {Ip}: {Result}", resolvedUser.Id, clientIp, result);
             }
 
-            RecordFailure();
+            slots.Commit();
             throw new AuthenticationException(InvalidCredentials);
         }
 
         if (!fullOk)
         {
-            RecordFailure();
+            slots.Commit();
             throw new AuthenticationException(InvalidCredentials);
         }
 
@@ -362,14 +372,16 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
         }
 
         var hour = TimeSpan.FromHours(1);
-        if (!_limiter.TryAcquire("mail:user:" + user.Id.ToString("N", CultureInfo.InvariantCulture), config.MaxEmailsPerUserPerHour, hour))
+        var userMailKey = "mail:user:" + user.Id.ToString("N", CultureInfo.InvariantCulture);
+        if (!_limiter.TryAcquire(userMailKey, config.MaxEmailsPerUserPerHour, hour, out var userMailAt))
         {
             _logger.LogWarning("Jelly2FA: per-user email budget exhausted for user {UserId}", user.Id);
             return;
         }
 
-        if (!_limiter.TryAcquire("mail:global", config.MaxEmailsPerHourGlobal, hour))
+        if (!_limiter.TryAcquire(GlobalMailKey, config.MaxEmailsPerHourGlobal, hour, out var globalMailAt))
         {
+            _limiter.Refund(userMailKey, userMailAt);
             _notifications.AlertAdmin("mail-global", "global email budget exhausted", "Jelly2FA stopped sending sign-in codes for up to an hour because the global email budget was exhausted. This can indicate an attack with valid passwords.");
             return;
         }
@@ -380,9 +392,18 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
             fingerprint,
             TimeSpan.FromMinutes(lifetime),
             config.MaxPendingPerUser,
-            clientIp == UnknownIp ? null : clientIp);
-        _notifications.SendCode(email, user.Username, code, auth.Device, auth.Client, clientIp, lifetime);
-        _logger.LogInformation("Jelly2FA: sign-in code emailed to user {UserId} (client {Client}, ip {Ip})", user.Id, auth.Client, clientIp);
+            clientIp == IpUtil.Unknown ? null : clientIp);
+        if (!_notifications.SendCode(email, user.Username, code, auth.Device, auth.Client, clientIp, lifetime))
+        {
+            // Not queued: drop the code so the resend cooldown does not block the next attempt, and give the budget back.
+            _challenges.Remove(binding);
+            _limiter.Refund(userMailKey, userMailAt);
+            _limiter.Refund(GlobalMailKey, globalMailAt);
+            _logger.LogWarning("Jelly2FA: sign-in code email for user {UserId} could not be queued; no code is pending", user.Id);
+            return;
+        }
+
+        _logger.LogInformation("Jelly2FA: sign-in code emailed to user {UserId} (client {Client}, ip {Ip})", user.Id, EmailAddress.SingleLine(auth.Client), clientIp);
     }
 
     private bool VerifyPassword(User user, string password)
@@ -413,15 +434,47 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
         return _services.GetRequiredService<IAuthorizationContext>().GetAuthorizationInfo(http);
     }
 
-    private static string NormalizedIp(IPAddress? ip)
+    private static ProviderAuthenticationResult Success(string username) => new() { Username = username };
+
+    /// <summary>
+    /// Failure-throttle slots taken for one attempt. Slots are given back on dispose unless
+    /// <see cref="Commit"/> marked the attempt as a real failure.
+    /// </summary>
+    private sealed class FailureSlots : IDisposable
     {
-        if (ip is null)
+        private readonly RateLimiter _limiter;
+        private readonly List<(string Key, DateTimeOffset At)> _taken = new(2);
+        private bool _committed;
+
+        public FailureSlots(RateLimiter limiter)
         {
-            return UnknownIp;
+            _limiter = limiter;
         }
 
-        return (ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip).ToString();
-    }
+        public bool TryTake(string key, int max, TimeSpan window)
+        {
+            if (!_limiter.TryAcquire(key, max, window, out var at))
+            {
+                return false;
+            }
 
-    private static ProviderAuthenticationResult Success(string username) => new() { Username = username };
+            _taken.Add((key, at));
+            return true;
+        }
+
+        public void Commit() => _committed = true;
+
+        public void Dispose()
+        {
+            if (!_committed)
+            {
+                foreach (var (key, at) in _taken)
+                {
+                    _limiter.Refund(key, at);
+                }
+            }
+
+            _taken.Clear();
+        }
+    }
 }

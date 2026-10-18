@@ -52,6 +52,9 @@ s, users = call("GET", f"{B}/Users", token=T)
 admin_id = [x for x in users if x["Name"] == "admin"][0]["Id"]
 ok("enroll alice", call("POST", f"{B}/Jelly2FA/Users/{u['Id']}/Enroll", {"Email": "alice@example.test"}, token=T), 204)
 ok("enroll admin", call("POST", f"{B}/Jelly2FA/Users/{admin_id}/Enroll", {"Email": "admin@example.test"}, token=T), 204)
+# A user name with a quote, for the offline recovery script.
+ob = ok("create O'Brien", call("POST", f"{B}/Users/New", {"Name": "O'Brien", "Password": "ObrienPass1!"}, token=T), 200)
+ok("enroll O'Brien", call("POST", f"{B}/Jelly2FA/Users/{ob['Id']}/Enroll", {"Email": "obrien@example.test"}, token=T), 204)
 ok("alice pre-enrollment token revoked", call("GET", f"{B}/Users/Me", token=pre["AccessToken"], device_id="alice-old"), 401)
 ok("admin's own token kept", call("GET", f"{B}/Users/Me", token=T), 200)
 ok("health", call("GET", f"{B}/Jelly2FA/Health", raw_auth=False), 200)
