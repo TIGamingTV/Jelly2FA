@@ -3,6 +3,14 @@
     "guid": "aeb8e07d-2227-4d18-ad2f-7f49c81db71b",
     "versions": [
       {
+        "version": "0.0.2.0",
+        "changelog": "0.0.2.0: Disabling the plugin returns sign-in to normal (users are handed back immediately and switched back to 2FA, with their sessions revoked, when it is enabled again); uninstall restores Jellyfin's default lockout, resets failed-login counters and deletes the SMTP password file. Failures through the proxy can no longer block LAN/Tailscale sign-in; the failure throttle is race-free and groups IPv6 by /64. Fixes in the recovery script (user names with quotes, exit codes), dropped code emails, health checks and configuration handling.",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/TIGamingTV/Jelly2FA/releases/download/v0.0.2.0/jelly2fa_0.0.2.0.zip",
+        "checksum": "72fd2dfd3b7be84506491519a325372b",
+        "timestamp": "2026-10-18T08:49:46Z"
+      },
+      {
         "version": "0.0.1.0",
         "changelog": "0.0.1.0: initial version. Emailed one-time code for sign-ins through the reverse proxy; password-only sign-in for direct LAN/Tailscale connections.",
         "targetAbi": "12.0.0.0",
