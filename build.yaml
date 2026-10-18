@@ -1,7 +1,7 @@
 ---
 name: "Jelly2FA"
 guid: "aeb8e07d-2227-4d18-ad2f-7f49c81db71b"
-version: "0.0.3.0"
+version: "0.0.4.0"
 targetAbi: "12.0.0.0"
 framework: "net10.0"
 overview: "Email-code two-factor authentication for remote sign-ins"
@@ -14,5 +14,5 @@ owner: "TIGamingTV"
 artifacts:
   - "Jellyfin.Plugin.Jelly2FA.dll"
 changelog: >
-  0.0.3.0: Adds the plugin image.
+  0.0.4.0: New plugin image. 0.0.3.0: Adds the plugin image.
   0.0.2.0: Disabling the plugin returns sign-in to normal (users are handed back immediately and switched back to 2FA, with their sessions revoked, when it is enabled again); uninstall restores Jellyfin's default lockout, resets failed-login counters and deletes the SMTP password file. Failures through the proxy can no longer block LAN/Tailscale sign-in; the failure throttle is race-free and groups IPv6 by /64. Fixes in the recovery script (user names with quotes, exit codes), dropped code emails, health checks and configuration handling.

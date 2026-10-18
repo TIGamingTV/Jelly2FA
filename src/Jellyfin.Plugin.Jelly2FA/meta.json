@@ -1,6 +1,6 @@
 {
   "category": "Authentication",
-  "changelog": "0.0.3.0: Adds the plugin image. 0.0.2.0: Disabling the plugin returns sign-in to normal (users are handed back immediately and switched back to 2FA, with their sessions revoked, when it is enabled again); uninstall restores Jellyfin's default lockout, resets failed-login counters and deletes the SMTP password file. Failures through the proxy can no longer block LAN/Tailscale sign-in; the failure throttle is race-free and groups IPv6 by /64. Fixes in the recovery script (user names with quotes, exit codes), dropped code emails, health checks and configuration handling.",
+  "changelog": "0.0.4.0: New plugin image. 0.0.3.0: Adds the plugin image. 0.0.2.0: Disabling the plugin returns sign-in to normal (users are handed back immediately and switched back to 2FA, with their sessions revoked, when it is enabled again); uninstall restores Jellyfin's default lockout, resets failed-login counters and deletes the SMTP password file. Failures through the proxy can no longer block LAN/Tailscale sign-in; the failure throttle is race-free and groups IPv6 by /64. Fixes in the recovery script (user names with quotes, exit codes), dropped code emails, health checks and configuration handling.",
   "description": "Requires an emailed one-time code (typed directly after the password) for sign-ins that arrive through the reverse proxy. Direct LAN/Tailscale sign-ins use the password only. No client changes needed.",
   "guid": "aeb8e07d-2227-4d18-ad2f-7f49c81db71b",
   "name": "Jelly2FA",
@@ -8,7 +8,7 @@
   "owner": "TIGamingTV",
   "targetAbi": "12.0.0.0",
   "framework": "net10.0",
-  "version": "0.0.3.0",
+  "version": "0.0.4.0",
   "status": "Active",
   "autoUpdate": false,
   "assemblies": [
