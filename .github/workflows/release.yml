@@ -30,9 +30,12 @@ jobs:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
       META: src/Jellyfin.Plugin.Jelly2FA/meta.json
     steps:
-      - uses: actions/checkout@v4
+      # No credentials in .git/config while third-party code (NuGet packages, tests) runs.
+      # Only the later checkout of main, used to push manifest.json, keeps the token.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.TAG }}
+          persist-credentials: false
 
       - name: Resolve version
         id: v
@@ -48,7 +51,7 @@ jobs:
           jq -r '.changelog // ""' "$META" >> "$GITHUB_OUTPUT"
           echo "EOF_CHANGELOG" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           global-json-file: global.json
 
@@ -85,7 +88,7 @@ jobs:
               --notes "$CHANGELOG"$'\n\nMD5: `'"$MD5"'`'
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: main
           path: repo-main

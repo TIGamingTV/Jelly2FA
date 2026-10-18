@@ -12,18 +12,27 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           global-json-file: global.json
       - name: Test
         run: dotnet test
       - name: Package
+        id: pkg
         run: |
-          dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o artifacts/Jelly2FA_0.0.1.0
-          rm -f artifacts/Jelly2FA_0.0.1.0/*.deps.json
-          (cd artifacts && zip -r jelly2fa_0.0.1.0.zip Jelly2FA_0.0.1.0)
-      - uses: actions/upload-artifact@v4
+          VERSION="$(jq -r .version src/Jellyfin.Plugin.Jelly2FA/meta.json)"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::meta.json version '$VERSION' must look like 1.2.3.4"; exit 1
+          fi
+          OUT="artifacts/Jelly2FA_$VERSION"
+          dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o "$OUT" \
+            -p:Version="$VERSION" -p:AssemblyVersion="$VERSION" -p:FileVersion="$VERSION"
+          rm -f "$OUT"/*.deps.json
+          # Same layout as the release zip: files at the root.
+          (cd "$OUT" && zip -r "../jelly2fa_$VERSION.zip" .)
+          echo "name=jelly2fa_$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: jelly2fa_0.0.1.0
-          path: artifacts/jelly2fa_0.0.1.0.zip
+          name: ${{ steps.pkg.outputs.name }}
+          path: artifacts/${{ steps.pkg.outputs.name }}.zip
