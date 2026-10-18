@@ -32,6 +32,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the server name shown in emails.</summary>
     public string ServerDisplayName { get; set; } = "Jellyfin";
 
+    /// <summary>Gets or sets the language of user emails ("en" or "de"; anything else falls back to English).</summary>
+    public string EmailLanguage { get; set; } = "en";
+
     // ---- Network / origin ----
 
     /// <summary>
@@ -61,6 +64,13 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool NotifyOnQuickConnect { get; set; } = true;
 
     // ---- Code / throttling policy ----
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the second sign-in step may contain only the emailed code
+    /// (instead of password + code). The code is only issued after a correct password, stays bound to
+    /// user/device/client and is additionally bound to the client IP that requested it. Off by default.
+    /// </summary>
+    public bool AllowCodeOnlySecondStep { get; set; }
 
     /// <summary>Gets or sets the code lifetime in minutes.</summary>
     public int CodeLifetimeMinutes { get; set; } = 10;

@@ -1,6 +1,8 @@
 using System;
 using System.Net;
 using System.Net.Mail;
+using System.Net.Mime;
+using System.Text;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -13,7 +15,8 @@ namespace Jellyfin.Plugin.Jelly2FA.Services;
 /// <param name="To">Recipient.</param>
 /// <param name="Subject">Subject (must not contain secrets).</param>
 /// <param name="Body">Plain text body.</param>
-public sealed record EmailMessage(string To, string Subject, string Body);
+/// <param name="HtmlBody">Optional HTML alternative (all interpolated values must already be HTML-encoded).</param>
+public sealed record EmailMessage(string To, string Subject, string Body, string? HtmlBody = null);
 
 /// <summary>Sends email.</summary>
 public interface IEmailSender
@@ -73,10 +76,17 @@ public sealed class SmtpEmailSender : IEmailSender
         {
             From = new MailAddress(c.FromAddress, EmailAddress.SingleLine(c.FromName)),
             Subject = EmailAddress.SingleLine(message.Subject),
+            SubjectEncoding = Encoding.UTF8,
             Body = message.Body,
+            BodyEncoding = Encoding.UTF8,
             IsBodyHtml = false,
         };
         mail.To.Add(new MailAddress(message.To));
+        if (!string.IsNullOrEmpty(message.HtmlBody))
+        {
+            // multipart/alternative: plain text first, HTML preferred by clients that support it.
+            mail.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(message.HtmlBody, Encoding.UTF8, MediaTypeNames.Text.Html));
+        }
 
 #pragma warning disable SYSLIB0014 // SmtpClient is fine for simple STARTTLS submission and avoids extra dependencies.
         using var client = new SmtpClient(c.SmtpHost.Trim(), c.SmtpPort)

@@ -273,6 +273,108 @@ public class ProviderTests
     }
 
     [Fact]
+    public async Task CodeOnly_DisabledByDefault_Rejected()
+    {
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        var code = _notifications.Codes.Single();
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code));
+        Request();
+        await Auth(Password + code); // code was not consumed
+    }
+
+    [Fact]
+    public async Task CodeOnly_Enabled_SameIp_Succeeds()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        Request();
+        var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Contains("code", ex.Message, StringComparison.Ordinal);
+        var code = _notifications.Codes.Single();
+
+        Request();
+        var ok = await Auth(code);
+        Assert.Equal("alice", ok.Username);
+        Assert.True(_approvals.TryConsume(_user.Id, "dev-1"));
+
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code)); // replay
+    }
+
+    [Fact]
+    public async Task CodeOnly_Enabled_OtherIp_Rejected()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        Request(ip: "203.0.113.5");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        var code = _notifications.Codes.Single();
+        Request(ip: "198.51.100.7");
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code));
+    }
+
+    [Fact]
+    public async Task CodeOnly_Enabled_OtherDevice_Rejected()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        Request(device: "dev-1");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        var code = _notifications.Codes.Single();
+        Request(device: "dev-2");
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code));
+    }
+
+    [Fact]
+    public async Task CodeOnly_Enabled_WrongCodes_InvalidateAndCountAsFailures()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        _config.MaxCodeAttempts = 2;
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        var code = _notifications.Codes.Single();
+        var wrong = code == "00000000" ? "00000001" : "00000000";
+        for (var i = 0; i < 2; i++)
+        {
+            Request();
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth(wrong));
+        }
+
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code)); // invalidated after 2 wrong entries
+    }
+
+    [Fact]
+    public async Task CodeOnly_Enabled_WithoutPendingCode_Rejected()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth("12345678"));
+        Assert.Empty(_notifications.Codes);
+    }
+
+    [Fact]
+    public async Task CodeOnly_Enabled_PasswordPlusCodeStillWorks()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Request();
+        await Auth(Password + _notifications.Codes.Single());
+    }
+
+    [Fact]
+    public async Task CodeOnly_Enabled_EightDigitPassword_StillIssuesCode()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        _user.Password = FakeCrypto.Hash("87654321");
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth("87654321"));
+        var code = _notifications.Codes.Single();
+        Request();
+        await Auth(code);
+    }
+
+    [Fact]
     public async Task ChangePassword_HashesAndDropsCodes()
     {
         Request();

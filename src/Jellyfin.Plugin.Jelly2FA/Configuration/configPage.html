@@ -5,7 +5,7 @@
     <title>Jelly2FA</title>
 </head>
 <body>
-<div id="Jelly2FAConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+<div id="Jelly2FAConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox,emby-select">
     <div data-role="content">
         <div class="content-primary">
             <h2 class="sectionTitle">Jelly2FA</h2>
@@ -29,6 +29,7 @@
                 <div class="inputContainer"><label class="inputLabel" for="FromName">From name</label><input id="FromName" type="text" is="emby-input" /></div>
                 <div class="inputContainer"><label class="inputLabel" for="AdminAlertEmail">Administrator alert email</label><input id="AdminAlertEmail" type="email" is="emby-input" /></div>
                 <div class="inputContainer"><label class="inputLabel" for="ServerDisplayName">Server name in emails</label><input id="ServerDisplayName" type="text" is="emby-input" /></div>
+                <div class="selectContainer"><label class="selectLabel" for="EmailLanguage">Language of user emails</label><select id="EmailLanguage" is="emby-select"><option value="en">English</option><option value="de">Deutsch</option></select><div class="fieldDescription">Used for sign-in code and Quick Connect emails. Administrator alerts stay in English.</div></div>
 
                 <h3>Network</h3>
                 <div class="inputContainer"><label class="inputLabel" for="ProxyAddresses">Reverse proxy addresses</label><input id="ProxyAddresses" type="text" is="emby-input" /><div class="fieldDescription">IPs/CIDRs of nginx as seen by Jellyfin, comma separated. Jellyfin's "Known proxies" are always included. If no proxy is known, everyone needs 2FA (fail closed).</div></div>
@@ -39,6 +40,9 @@
                 <h3>Quick Connect</h3>
                 <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="AllowQuickConnect" type="checkbox" is="emby-checkbox" /><span>Allow Quick Connect for enrolled users (approval from an already signed-in device)</span></label></div>
                 <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="NotifyOnQuickConnect" type="checkbox" is="emby-checkbox" /><span>Email the user on every Quick Connect sign-in</span></label></div>
+
+                <h3>Second step</h3>
+                <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="AllowCodeOnlySecondStep" type="checkbox" is="emby-checkbox" /><span>Allow the code alone as the second step (user name + code instead of password + code)</span></label><div class="fieldDescription">The code is still only sent after a correct password and only works once, on the same device/app and from the same IP that requested it. Trade-off: whoever can read the user's mailbox (and copies the device details from the same network) can use a pending code without retyping the password. Password + code keeps working.</div></div>
 
                 <h3>Limits</h3>
                 <div class="inputContainer"><label class="inputLabel" for="CodeLifetimeMinutes">Code lifetime (minutes, 1-60)</label><input id="CodeLifetimeMinutes" type="number" min="1" max="60" is="emby-input" /></div>
@@ -71,7 +75,7 @@
             var page = document.querySelector('#Jelly2FAConfigPage');
             var textFields = ['SmtpHost', 'SmtpUsername', 'FromAddress', 'FromName', 'AdminAlertEmail', 'ServerDisplayName', 'ProxyAddresses', 'TrustedDirectNetworks'];
             var numberFields = ['SmtpPort', 'CodeLifetimeMinutes', 'MaxCodeAttempts', 'MaxPendingPerUser', 'ResendCooldownSeconds', 'MaxEmailsPerUserPerHour', 'MaxEmailsPerHourGlobal', 'MaxFailuresPerIp', 'IpWindowMinutes', 'MaxFailuresPerUser', 'UserWindowMinutes'];
-            var boolFields = ['TrustJellyfinLocalNetworks', 'TrustLoopback', 'AllowQuickConnect', 'NotifyOnQuickConnect'];
+            var boolFields = ['TrustJellyfinLocalNetworks', 'TrustLoopback', 'AllowQuickConnect', 'NotifyOnQuickConnect', 'AllowCodeOnlySecondStep'];
 
             function esc(s) {
                 return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -158,6 +162,7 @@
                     textFields.forEach(function (f) { page.querySelector('#' + f).value = config[f] || ''; });
                     numberFields.forEach(function (f) { page.querySelector('#' + f).value = config[f]; });
                     boolFields.forEach(function (f) { page.querySelector('#' + f).checked = !!config[f]; });
+                    page.querySelector('#EmailLanguage').value = config.EmailLanguage === 'de' ? 'de' : 'en';
                     Dashboard.hideLoadingMsg();
                     refresh();
                 }, function (err) { Dashboard.hideLoadingMsg(); fail(err); });
@@ -173,6 +178,7 @@
                     textFields.forEach(function (f) { config[f] = page.querySelector('#' + f).value.trim(); });
                     numberFields.forEach(function (f) { config[f] = parseInt(page.querySelector('#' + f).value, 10) || 0; });
                     boolFields.forEach(function (f) { config[f] = page.querySelector('#' + f).checked; });
+                    config.EmailLanguage = page.querySelector('#EmailLanguage').value;
                     return ApiClient.updatePluginConfiguration(pluginId, config);
                 }).then(function (result) {
                     Dashboard.processPluginConfigurationUpdateResult(result);

@@ -120,3 +120,62 @@ public class EmailAddressTests
     public void SingleLine_StripsControlCharacters()
         => Assert.DoesNotContain('\n', EmailAddress.SingleLine("Server\r\nBcc: x@y"));
 }
+
+public class NotificationTemplateTests
+{
+    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-10-17T12:00:00Z");
+
+    private static EmailMessage Code(string? lang, bool codeOnly = false, string user = "alice", string device = "Phone")
+        => NotificationService.BuildCodeEmail(lang, codeOnly, "MyServer", "a@example.com", user, "12345678", device, "App", "203.0.113.5", 10, Now);
+
+    [Fact]
+    public void English_IsDefault_AndHtmlHighlightsCode()
+    {
+        var m = Code(null);
+        Assert.Equal("MyServer: sign-in code", m.Subject);
+        Assert.Contains("Hello alice,", m.Body, StringComparison.Ordinal);
+        Assert.Contains("12345678", m.Body, StringComparison.Ordinal);
+        Assert.Contains("MyPassword12345678", m.Body, StringComparison.Ordinal);
+        Assert.NotNull(m.HtmlBody);
+        Assert.Contains("font-weight:bold", m.HtmlBody, StringComparison.Ordinal);
+        Assert.Contains(">12345678</span>", m.HtmlBody, StringComparison.Ordinal);
+        Assert.Equal(Code("xx").Subject, m.Subject); // unknown language falls back to English
+    }
+
+    [Fact]
+    public void German_Texts()
+    {
+        var m = Code("de");
+        Assert.Equal("MyServer: Anmeldecode", m.Subject);
+        Assert.Contains("Hallo alice,", m.Body, StringComparison.Ordinal);
+        Assert.Contains("MeinPasswort12345678", m.Body, StringComparison.Ordinal);
+        Assert.Contains("Gerät:", m.Body, StringComparison.Ordinal);
+        Assert.Contains("Ger&#228;t", m.HtmlBody, StringComparison.Ordinal); // HtmlEncode escapes non-ASCII
+    }
+
+    [Fact]
+    public void CodeOnly_ChangesInstructions()
+    {
+        Assert.DoesNotContain("MyPassword", Code("en", codeOnly: true).Body, StringComparison.Ordinal);
+        Assert.Contains("only this code", Code("en", codeOnly: true).Body, StringComparison.Ordinal);
+        Assert.Contains("nur diesen Code", Code("de", codeOnly: true).Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Html_IsEncoded()
+    {
+        var m = Code("en", user: "<b>x</b>", device: "<script>alert(1)</script>");
+        Assert.DoesNotContain("<script>", m.HtmlBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("<b>x</b>", m.HtmlBody, StringComparison.Ordinal);
+        Assert.Contains("&lt;script&gt;", m.HtmlBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QuickConnect_German()
+    {
+        var m = NotificationService.BuildQuickConnectEmail("de", "MyServer", "a@example.com", "alice", "Phone", "App", "203.0.113.5", Now);
+        Assert.Equal("MyServer: neue Anmeldung per Quick Connect", m.Subject);
+        Assert.Contains("Freigegeben von IP: 203.0.113.5", m.Body, StringComparison.Ordinal);
+        Assert.Null(m.HtmlBody);
+    }
+}

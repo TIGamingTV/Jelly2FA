@@ -120,6 +120,34 @@ public class ChallengeStoreTests
     }
 
     [Fact]
+    public void RequiredIp_MustMatchIssuingIp()
+    {
+        var store = Store();
+        var code = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3, "203.0.113.5");
+        Assert.Equal(VerifyResult.IpMismatch, store.Verify(Bind(), code, Fp, 5, "198.51.100.7"));
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), code, Fp, 5, "203.0.113.5"));
+    }
+
+    [Fact]
+    public void RequiredIp_WithoutStoredIp_IsRejected()
+    {
+        var store = Store();
+        var code = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        Assert.Equal(VerifyResult.IpMismatch, store.Verify(Bind(), code, Fp, 5, "203.0.113.5"));
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), code, Fp, 5)); // no IP requirement: password+code path
+    }
+
+    [Fact]
+    public void IpMismatch_CountsAsAttempt()
+    {
+        var store = Store();
+        var code = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3, "203.0.113.5");
+        Assert.Equal(VerifyResult.IpMismatch, store.Verify(Bind(), code, Fp, 2, "198.51.100.7"));
+        Assert.Equal(VerifyResult.TooManyAttempts, store.Verify(Bind(), code, Fp, 2, "198.51.100.7"));
+        Assert.Equal(VerifyResult.NoChallenge, store.Verify(Bind(), code, Fp, 2, "203.0.113.5"));
+    }
+
+    [Fact]
     public void ParallelRedemption_OnlyOneSucceeds()
     {
         var store = Store();

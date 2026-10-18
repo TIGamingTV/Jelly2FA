@@ -40,6 +40,9 @@ public enum VerifyResult
 
     /// <summary>The password changed after the code was issued (removed).</summary>
     PasswordChanged,
+
+    /// <summary>The code was entered from a different client IP than the one that requested it (counts as a wrong entry).</summary>
+    IpMismatch,
 }
 
 /// <summary>
@@ -72,15 +75,16 @@ public sealed class ChallengeStore
     /// <param name="passwordFingerprint">Fingerprint of the stored password hash at issue time.</param>
     /// <param name="lifetime">Lifetime.</param>
     /// <param name="maxPendingPerUser">Maximum pending codes per user (oldest evicted).</param>
+    /// <param name="clientIp">Client IP that requested the code (used for code-only verification).</param>
     /// <returns>The plaintext code (to be emailed, never stored).</returns>
-    public string Issue(ChallengeBinding binding, byte[] passwordFingerprint, TimeSpan lifetime, int maxPendingPerUser)
+    public string Issue(ChallengeBinding binding, byte[] passwordFingerprint, TimeSpan lifetime, int maxPendingPerUser, string? clientIp = null)
     {
         var code = RandomNumberGenerator.GetInt32(0, 100_000_000).ToString("D8", CultureInfo.InvariantCulture);
         var now = _time.GetUtcNow();
         lock (_lock)
         {
             PruneExpired(now);
-            _entries[binding.Key] = new Entry(binding.UserId, Mac(binding, code), passwordFingerprint, now, now + lifetime);
+            _entries[binding.Key] = new Entry(binding.UserId, Mac(binding, code), passwordFingerprint, now, now + lifetime, clientIp);
 
             var forUser = _entries.Where(e => e.Value.UserId == binding.UserId)
                 .OrderBy(e => e.Value.CreatedUtc)
@@ -112,8 +116,9 @@ public sealed class ChallengeStore
     /// <param name="code">Entered code.</param>
     /// <param name="passwordFingerprint">Current fingerprint of the stored password hash.</param>
     /// <param name="maxAttempts">Allowed wrong entries.</param>
+    /// <param name="requiredIp">If set, the code is only accepted from the client IP that requested it.</param>
     /// <returns>The result.</returns>
-    public VerifyResult Verify(ChallengeBinding binding, string code, byte[] passwordFingerprint, int maxAttempts)
+    public VerifyResult Verify(ChallengeBinding binding, string code, byte[] passwordFingerprint, int maxAttempts, string? requiredIp = null)
     {
         var now = _time.GetUtcNow();
         lock (_lock)
@@ -135,7 +140,10 @@ public sealed class ChallengeStore
                 return VerifyResult.PasswordChanged;
             }
 
-            if (CryptographicOperations.FixedTimeEquals(entry.CodeMac, Mac(binding, code)))
+            var ipOk = requiredIp is null
+                || (entry.ClientIp is not null && string.Equals(entry.ClientIp, requiredIp, StringComparison.Ordinal));
+            var codeOk = CryptographicOperations.FixedTimeEquals(entry.CodeMac, Mac(binding, code));
+            if (ipOk && codeOk)
             {
                 _entries.Remove(binding.Key);
                 return VerifyResult.Success;
@@ -148,7 +156,7 @@ public sealed class ChallengeStore
                 return VerifyResult.TooManyAttempts;
             }
 
-            return VerifyResult.WrongCode;
+            return ipOk ? VerifyResult.WrongCode : VerifyResult.IpMismatch;
         }
     }
 
@@ -201,14 +209,17 @@ public sealed class ChallengeStore
 
     private sealed class Entry
     {
-        public Entry(Guid userId, byte[] codeMac, byte[] passwordFingerprint, DateTimeOffset createdUtc, DateTimeOffset expiresUtc)
+        public Entry(Guid userId, byte[] codeMac, byte[] passwordFingerprint, DateTimeOffset createdUtc, DateTimeOffset expiresUtc, string? clientIp)
         {
             UserId = userId;
             CodeMac = codeMac;
             PasswordFingerprint = passwordFingerprint;
             CreatedUtc = createdUtc;
             ExpiresUtc = expiresUtc;
+            ClientIp = clientIp;
         }
+
+        public string? ClientIp { get; }
 
         public Guid UserId { get; }
 

@@ -17,7 +17,8 @@ namespace Jellyfin.Plugin.Jelly2FA.Services;
 /// BEFORE any access token is created. Throwing here means no token is issued.
 /// <list type="bullet">
 /// <item>Direct connection from LAN/Tailscale (not through the proxy): password only.</item>
-/// <item>Anything else (through nginx/DDNS, unknown origin): password + emailed one-time code typed directly after the password.</item>
+/// <item>Anything else (through nginx/DDNS, unknown origin): password + emailed one-time code typed directly after the password
+/// (or, if <c>AllowCodeOnlySecondStep</c> is on, the code alone in a second attempt from the same device/client/IP).</item>
 /// </list>
 /// Responses: wrong password/code -> 401 (AuthenticationException); code required / throttled / misconfigured -> 403
 /// (MediaBrowser.Controller.Net.SecurityException, which Jellyfin does not count toward lockout).
@@ -25,6 +26,7 @@ namespace Jellyfin.Plugin.Jelly2FA.Services;
 public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, IRequiresResolvedUser
 {
     private const string InvalidCredentials = "Invalid username or password.";
+    private const string UnknownIp = "unknown";
 
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly IServiceProvider _services;
@@ -216,6 +218,27 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
         var fingerprint = ChallengeStore.Fingerprint(resolvedUser.Password);
         var fullOk = VerifyPassword(resolvedUser, password);
 
+        // Optional: second step with the code only. The code was issued only after a correct password and is
+        // bound to user/device/client AND the client IP that requested it; wrong entries count like wrong codes.
+        if (!fullOk && config.AllowCodeOnlySecondStep && IsCodeOnly(password) && _challenges.HasPending(binding))
+        {
+            var result = _challenges.Verify(binding, password, fingerprint, config.MaxCodeAttempts, clientIp);
+            if (result == VerifyResult.Success)
+            {
+                _approvals.Approve(resolvedUser.Id, deviceId);
+                _logger.LogInformation(
+                    "Jelly2FA: two-factor sign-in (code only) completed for user {UserId} from {Ip} ({Reason})",
+                    resolvedUser.Id,
+                    clientIp,
+                    origin.Reason);
+                return Success(username);
+            }
+
+            _logger.LogWarning("Jelly2FA: code-only entry rejected for user {UserId} from {Ip}: {Result}", resolvedUser.Id, clientIp, result);
+            RecordFailure();
+            throw new AuthenticationException(InvalidCredentials);
+        }
+
         if (!fullOk && TrySplitCode(password, out var passwordPart, out var code) && _challenges.HasPending(binding))
         {
             if (VerifyPassword(resolvedUser, passwordPart))
@@ -247,7 +270,9 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
 
         // Correct password, no (valid) code: issue a code (respecting cooldown and budgets) and refuse with 403.
         IssueCodeIfAllowed(config, resolvedUser, enrollment.Email, binding, fingerprint, auth, clientIp);
-        throw new SecurityException("Two-factor verification required: enter your password followed by the code sent by email.");
+        throw new SecurityException(config.AllowCodeOnlySecondStep
+            ? "Two-factor verification required: enter the code sent by email as the password."
+            : "Two-factor verification required: enter your password followed by the code sent by email.");
     }
 
     /// <inheritdoc />
@@ -293,6 +318,27 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
         return true;
     }
 
+    /// <summary>Whether the input is exactly a code (8 ASCII digits).</summary>
+    /// <param name="input">Entered password field.</param>
+    /// <returns>True if the input is only a code.</returns>
+    internal static bool IsCodeOnly(string input)
+    {
+        if (input.Length != ChallengeStore.CodeLength)
+        {
+            return false;
+        }
+
+        foreach (var ch in input)
+        {
+            if (ch is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private void IssueCodeIfAllowed(
         Configuration.PluginConfiguration config,
         User user,
@@ -329,7 +375,12 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
         }
 
         var lifetime = Math.Clamp(config.CodeLifetimeMinutes, 1, 60);
-        var code = _challenges.Issue(binding, fingerprint, TimeSpan.FromMinutes(lifetime), config.MaxPendingPerUser);
+        var code = _challenges.Issue(
+            binding,
+            fingerprint,
+            TimeSpan.FromMinutes(lifetime),
+            config.MaxPendingPerUser,
+            clientIp == UnknownIp ? null : clientIp);
         _notifications.SendCode(email, user.Username, code, auth.Device, auth.Client, clientIp, lifetime);
         _logger.LogInformation("Jelly2FA: sign-in code emailed to user {UserId} (client {Client}, ip {Ip})", user.Id, auth.Client, clientIp);
     }
@@ -366,7 +417,7 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
     {
         if (ip is null)
         {
-            return "unknown";
+            return UnknownIp;
         }
 
         return (ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip).ToString();

@@ -29,6 +29,12 @@ Administrators are treated exactly like everyone else. **API keys keep working a
 - Each code is random, single use, valid for 10 minutes, and allows 5 wrong tries.
 - It only works for the user, device id and app that requested it, and only while the password is unchanged.
 - It is stored only as an HMAC in memory, so restarting Jellyfin discards pending codes.
+- The email has a plain-text part and an HTML part that shows the code in large bold type. The language is English or German (setting *Language of user emails*). Administrator alerts are always in English.
+
+**Optional: code-only second step** (setting *Allow the code alone as the second step*, **off by default**). When it is on, the second sign-in can be the user name plus **only the code** in the password field. Password + code keeps working too.
+- The code is still only emailed after a correct password.
+- It is additionally bound to the **client IP** that requested it. Entering it from another IP counts as a wrong try.
+- Trade-off: the password is not checked again on the second step. Someone who can read the mailbox while the code is valid could use it, but only with the same device id, app name and IP as the original sign-in. Leave this off if you want the password re-checked.
 
 **Abuse limits:**
 - Emails are sent only after a correct password, with a 60 s resend cooldown, at most 5 per user per hour and 50 per hour for the server.
