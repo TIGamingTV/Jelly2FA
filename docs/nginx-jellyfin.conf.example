@@ -43,13 +43,20 @@ server {
     set $jellyfin http://192.168.1.20:8096;   # Jellyfin address as reached FROM nginx
 
     # Obsolete login route that takes the password in the URL (?pw=). Jelly2FA enforces 2FA on it anyway,
-    # but blocking it keeps passwords out of every log.
-    location ~* ^/Users/[0-9a-f-]+/Authenticate$ {
+    # but blocking it keeps passwords out of every log. (Jellyfin also accepts a trailing slash.)
+    location ~* ^/Users/[0-9a-f-]+/Authenticate/?$ {
         return 404;
     }
 
-    # Sign-in endpoints: rate limited.
-    location ~* ^/(Users/AuthenticateByName|Users/AuthenticateWithQuickConnect|QuickConnect/) {
+    # The anonymous watchdog endpoint is only needed on the Jellyfin host itself (the watchdog talks to
+    # Jellyfin directly, not through nginx). Matched case-insensitively, like Jellyfin's routing.
+    location ~* ^/Jelly2FA/Health/?$ {
+        return 404;
+    }
+
+    # Sign-in endpoints: rate limited. Quick Connect *polling* (GET /QuickConnect/Connect, repeated by the
+    # waiting device) is deliberately left out so a slow approval does not run into the limit.
+    location ~* ^/(Users/AuthenticateByName|Users/AuthenticateWithQuickConnect|QuickConnect/(Initiate|Authorize))/?$ {
         limit_req zone=jellyfin_auth burst=10 nodelay;
         limit_req_status 429;
         proxy_pass $jellyfin;

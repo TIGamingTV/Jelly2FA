@@ -1,6 +1,6 @@
 # Jelly2FA
 
-> **Unofficial, personal project (version 0.0.1.0).** Not affiliated with Jellyfin. Not audited. Use at your own risk and keep a recovery path (see below).
+> **Unofficial, personal project (version 0.0.2.0).** Not affiliated with Jellyfin. Not audited. Use at your own risk and keep a recovery path (see below).
 
 Jelly2FA is a Jellyfin **12.x** plugin that adds a second factor to sign-ins that come in through your reverse proxy (nginx + DDNS), **without changing any client app**.
 
@@ -8,8 +8,10 @@ Jelly2FA is a Jellyfin **12.x** plugin that adds a second factor to sign-ins tha
 |---|---|
 | Through nginx / DDNS (internet) | password, then **password + 8-digit code** from the email (no space) |
 | Direct LAN connection (Jellyfin "LAN networks") | password only |
-| Direct Tailscale connection (100.64.0.0/10, fd7a:115c:a1e0::/48) | password only |
+| Direct Tailscale connection (100.64.0.0/10, fd7a:115c:a1e0::/48)¹ | password only |
 | Anything unclear (unknown proxy, forwarding headers, missing data) | 2FA (fail closed) |
+
+¹ 100.64.0.0/10 is also the carrier-grade NAT range. If Jellyfin can be reached *directly* (not through nginx) from such an address, for example an ISP's CGNAT network or a VPS provider's internal network, remove it from *Trusted direct networks* and list your exact Tailscale addresses instead.
 
 Administrators are treated exactly like everyone else. **API keys keep working as normal** (they are not sign-ins).
 
@@ -35,10 +37,12 @@ Administrators are treated exactly like everyone else. **API keys keep working a
 - The code is still only emailed after a correct password.
 - It is additionally bound to the **client IP** that requested it. Entering it from another IP counts as a wrong try.
 - Trade-off: the password is not checked again on the second step. Someone who can read the mailbox while the code is valid could use it, but only with the same device id, app name and IP as the original sign-in. Leave this off if you want the password re-checked.
+- The IP binding needs Jellyfin's **Known proxies** to be set (otherwise every remote client has nginx's IP). With the option on and Known proxies empty, the status page reports a problem.
 
 **Abuse limits:**
 - Emails are sent only after a correct password, with a 60 s resend cooldown, at most 5 per user per hour and 50 per hour for the server.
-- Failed sign-ins are throttled per IP (10 / 5 min) and per user (10 / 15 min).
+- Failed sign-ins are throttled per IP (10 / 5 min; IPv6 per /64) and, for sign-ins through the proxy, per user (10 / 15 min). Direct LAN/Tailscale sign-ins are throttled per IP only, so failures from the internet cannot lock a user out of the LAN.
+- If a code email cannot be queued, no code is kept, so the next attempt sends a new one instead of waiting for the resend cooldown.
 - Jellyfin's own lockout is switched off for enrolled users. A lockout disables the account, which would also kill existing sessions, and anyone who knows a username could trigger it.
 
 **Quick Connect** stays available. A code can only be approved from a session that is already signed in. Enrolling a user revokes all of that user's older sessions, so every approving session has passed 2FA or come from LAN/Tailscale. The user is emailed about every Quick Connect sign-in; you can turn that off, or disable Quick Connect for enrolled users altogether.
@@ -59,9 +63,9 @@ Administrators are treated exactly like everyone else. **API keys keep working a
      Then install **Jelly2FA** from the **Catalog** (category *Authentication*) and restart Jellyfin.
    - **Manually:** build it (or download the zip from a GitHub release):
      ```sh
-     dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o out/Jelly2FA_0.0.1.0
+     dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o out/Jelly2FA_0.0.2.0
      ```
-     Copy the folder `Jelly2FA_0.0.1.0` (it contains `Jellyfin.Plugin.Jelly2FA.dll` and `meta.json`) into Jellyfin's `plugins` directory, for example `/var/lib/jellyfin/plugins/` or `/config/plugins/` in Docker. Then restart Jellyfin.
+     Copy the folder `Jelly2FA_0.0.2.0` (it contains `Jellyfin.Plugin.Jelly2FA.dll` and `meta.json`) into Jellyfin's `plugins` directory, for example `/var/lib/jellyfin/plugins/` or `/config/plugins/` in Docker. Then restart Jellyfin.
 2. Configure the Jellyfin networking settings below.
 3. Open **Dashboard → Plugins → Jelly2FA** and configure SMTP. Save the SMTP password with its own button; it is stored in `plugins/Jellyfin.Plugin.Jelly2FA/secrets.json` with mode 0600, or comes from the environment variable `JELLY2FA_SMTP_PASSWORD`. Then send a test email.
 4. **While connected over LAN or Tailscale**, enroll each user, including admins, with their email address. Enrolling signs out all existing sessions of that user except the one you are using.
@@ -80,7 +84,7 @@ See [`docs/nginx-jellyfin.conf.example`](docs/nginx-jellyfin.conf.example). The 
 - nginx must always send `X-Forwarded-For` (the official Jellyfin config does).
 - nginx must connect from an address listed as a proxy.
 
-The example also rate-limits the sign-in routes, blocks the obsolete `?pw=` route and strips query strings from logs.
+The example also rate-limits the sign-in routes (not Quick Connect polling), blocks the obsolete `?pw=` route, hides the anonymous `/Jelly2FA/Health` endpoint from the internet (the watchdog talks to Jellyfin directly) and strips query strings from logs.
 
 **Topology caveats:**
 - If nginx runs **on the Jellyfin host**, it connects from `127.0.0.1`. Loopback is not trusted by default; leave *Trust loopback* off.
@@ -110,7 +114,7 @@ Verified from the clients' source code, not by testing on devices: all listed ap
 ## Recovery
 
 - **Already signed-in sessions keep working if the plugin breaks.** Tokens are checked by Jellyfin, not by the plugin, and lockout is off for enrolled users. This was verified on Jellyfin 12.2.
-- **New sign-ins of enrolled users fail if the plugin is not loaded**, even on LAN. Jellyfin then uses its "invalid provider", which refuses everyone.
+- **New sign-ins of enrolled users fail if the plugin cannot load** (crash, incompatible Jellyfin version, folder deleted by hand), even on LAN. Jellyfin then uses its "invalid provider", which refuses everyone. This is different from *disabling* the plugin, see below.
 - **Plugin loaded but SMTP broken** → LAN/Tailscale sign-in still works (password only). Fix SMTP from there.
 - **Plugin not loaded** → nobody enrolled can sign in. Recover from any session that is still signed in, or use shell access to the host (for example SSH over LAN/Tailscale):
   ```sh
@@ -118,24 +122,37 @@ Verified from the clients' source code, not by testing on devices: all listed ap
   sudo tools/jelly2fa-recover.sh /var/lib/jellyfin/data/jellyfin.db <username>   # or --all
   sudo systemctl start jellyfin
   ```
-  The script backs up the database first. The user then signs in with the password only until you re-enroll them.
+  The script backs up the database first, restores Jellyfin's default lockout and resets the failed-login counter. The user then signs in with the password only until you re-enroll them. It exits non-zero if no matching Jelly2FA user was found (user names are matched case-insensitively).
 - Optional: keep one extra admin account that is **not enrolled**, with "Allow remote connections" turned off. Jellyfin blocks it remotely, but only if Known proxies is set correctly.
-- **Uninstalling** the plugin from the dashboard hands enrolled users back to the default provider automatically.
+
+### Disabling, enabling and uninstalling
+
+The plugin behaves like any other plugin in **Dashboard → Plugins**:
+
+- **Disable**: sign-in returns to normal immediately, without a restart. Every user on Jelly2FA is switched to Jellyfin's default provider with Jellyfin's default lockout, and the failed-login counter is reset. The plugin remembers who was enrolled, and the admin gets an alert email. The status page says *disabled* until you restart; after the restart the plugin is not loaded.
+- **Enable**: the remembered users are switched back to two-factor sign-in and **all their sessions are revoked**, because those may have been created with the password only. This happens immediately if the plugin is still loaded (your own session is kept), otherwise during the next start, before Jellyfin accepts sign-ins. Users whose provider you changed in the meantime are left alone.
+- While the plugin is disabled you cannot enroll users. Unenrolling still works.
+- **Uninstall** (of an active plugin): users are switched back to the default provider (default lockout, counter reset), the enrollment list is cleared and the SMTP password file is deleted. Jellyfin leaves the plugin's settings file (`plugins/configurations/Jellyfin.Plugin.Jelly2FA.xml`) behind, as for every plugin.
+- **Uninstalling a disabled plugin** cannot run any plugin code. Users are already on normal sign-in, but `plugins/Jellyfin.Plugin.Jelly2FA/secrets.json` (the SMTP password) and the settings file with the email addresses stay behind; delete them by hand. A later reinstall does **not** re-activate anybody; the status page then lists those users as "enrolled but uses another authentication provider".
 
 ### Watchdog (email when the plugin is down)
 
 A plugin that failed to load cannot send email itself. Use the watchdog on the host instead:
 
 ```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin jelly2fa-watchdog
 sudo install -m 0755 tools/jelly2fa-watchdog.sh /usr/local/bin/
 echo 'ALERT_TO=you@example.com' | sudo tee /etc/default/jelly2fa-watchdog
 sudo cp tools/systemd/jelly2fa-watchdog.* /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable --now jelly2fa-watchdog.timer
 ```
 
+The watchdog runs as the unprivileged user `jelly2fa-watchdog` (the unit was checked with `systemd-analyze verify`, mail delivery as that user was not tested). postfix's `sendmail` is normally usable by any local user. For msmtp, give that user a readable config, for example `SENDMAIL="msmtp -C /etc/jelly2fa-watchdog/msmtprc -t"` in `/etc/default/jelly2fa-watchdog`, with the file owned by `jelly2fa-watchdog` and mode 0600. `/etc/default/jelly2fa-watchdog` is executed as a shell script by the watchdog, so keep it owned by root and not writable by others.
+
 It checks `GET /health` (Jellyfin) and `GET /Jelly2FA/Health` every 5 minutes:
 - 200: OK
-- 404: plugin not loaded
+- 404: plugin not loaded (also after disabling it and restarting)
 - 503: degraded (SMTP, proxy settings or user enrollment problems)
 
 It mails you on every state change, via `sendmail -t` (for example msmtp or postfix). While the plugin is loaded, it also emails the administrator alert address about problems itself, at most once per hour.
@@ -153,7 +170,7 @@ It mails you on every state change, via `sendmail -t` (for example msmtp or post
 ## Development
 
 ```sh
-dotnet test                       # 78 unit tests
+dotnet test                       # unit tests
 tests/e2e/run_e2e.sh              # end-to-end against a throwaway Jellyfin 12.2 (see header of the script)
 ```
 
@@ -162,12 +179,17 @@ The end-to-end suite runs against the real Jellyfin 12.2 server, with 127.0.0.1 
 - LAN, Tailscale-style and untrusted direct connections; spoofed forwarding headers;
 - admins via the proxy; the legacy and lowercase routes;
 - API keys (header and `?ApiKey=`); Quick Connect (allowed, notified, disabled);
-- fail closed without a proxy; password change; throttling without account lockout.
+- fail closed without a proxy; password change; throttling without account lockout; remote failures not blocking LAN sign-in;
+- the code-only option (IP binding); unenroll after failed sign-ins (no surprise lockout); a posted configuration without users;
+- Disable (immediate and after restart), Enable (immediate and at startup, sessions revoked), Uninstall of an active and of a disabled plugin, reinstall;
+- the plugin failing to load (fail closed) and `tools/jelly2fa-recover.sh` with a user name containing a quote.
+
+It needs the Jellyfin 12.2 tarball, the .NET SDK, python3, sqlite3, openssl and curl.
 
 ### Releasing
 
 1. Update `version` and `changelog` in `src/Jellyfin.Plugin.Jelly2FA/meta.json`.
-2. Tag and push: `git tag v0.0.2.0 && git push origin v0.0.2.0`.
+2. Tag and push: `git tag v0.0.3.0 && git push origin v0.0.3.0`.
 
 The `release` workflow runs the tests, builds `jelly2fa_<version>.zip`, attaches it to a GitHub release, and adds the version (with its MD5 checksum) to `manifest.json` on `main`. Jellyfin reads that file as the plugin repository. If `main` is branch-protected, allow `github-actions[bot]` to push to it.
 
