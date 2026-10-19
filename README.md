@@ -1,6 +1,6 @@
 # Jelly2FA
 
-> **Unofficial, personal project (version 0.0.2.0).** Not affiliated with Jellyfin. Not audited. Use at your own risk and keep a recovery path (see below).
+> **Unofficial, personal project (version 0.0.5.0).** Not affiliated with Jellyfin. Not audited. Use at your own risk and keep a recovery path (see below).
 
 Jelly2FA is a Jellyfin **12.x** plugin that adds a second factor to sign-ins that come in through your reverse proxy (nginx + DDNS), **without changing any client app**.
 
@@ -21,6 +21,8 @@ Administrators are treated exactly like everyone else. **API keys keep working a
 2. The user signs in again in the same app and types `password` + `code`, for example `MyPassword12345678`.
 3. Jelly2FA checks the password and the code, and Jellyfin issues its normal token. That token behaves exactly like any other Jellyfin session (sign-out, device removal and password changes all work as usual).
 
+**401 or 403.** Only a wrong password (or a code alone that was never issued) is answered with **401**, which Jellyfin counts as a failed sign-in (log line "Authentication request for … has been denied", activity log, failed-login counter). Everything that follows a **correct password** is answered with **403** and is not counted by Jellyfin: code required, code wrong, code already used or expired, no code pending for this device. The same applies to a code that was issued to the user recently and is entered again (for example by an app that signs in again with stored credentials). Jellyfin's log then says what happened, for example `Jelly2FA: two-factor verification required: password correct, a sign-in code was sent by email` or `Jelly2FA: this sign-in code is no longer valid (already used, expired, or requested by another device)`. Wrong codes still count for Jelly2FA's own limits (see *Abuse limits*). See also [fail2ban / CrowdSec](#fail2ban--crowdsec).
+
 **How "LAN or proxy" is decided.** A tiny middleware records the real TCP peer address *before* Jellyfin applies `X-Forwarded-For`.
 - **2FA** if the peer is your proxy, or if the request carries **any** forwarding header (`X-Forwarded-*`, `X-Real-IP`, `Forwarded`, …).
 - **Password only** if it is a plain direct connection from a LAN or Tailscale address.
@@ -28,10 +30,12 @@ Administrators are treated exactly like everyone else. **API keys keep working a
 - If no proxy address is configured at all, everyone needs 2FA.
 
 **The code:**
-- Each code is random, single use, valid for 10 minutes, and allows 5 wrong tries.
+- Each code is random, single use (unless [code reuse](#code-reuse-seerr-neptune) is on), valid for 10 minutes, and allows 5 wrong tries.
 - It only works for the user, device id and app that requested it, and only while the password is unchanged.
-- It is stored only as an HMAC in memory, so restarting Jellyfin discards pending codes.
+- It is stored only as an HMAC in memory, so restarting Jellyfin discards pending codes. The HMACs of the last 10 codes per user are kept for up to 30 days (also in memory only), so that an old code entered again is recognised and answered with 403 instead of counting as a failed sign-in.
 - The email has a plain-text part and an HTML part that shows the code in large bold type. The language is English or German (setting *Language of user emails*). Administrator alerts are always in English.
+- Times in emails use the server's time zone, for example `2026-10-19 14:05 Europe/Berlin (UTC+02:00)`. In Docker, set the environment variable `TZ` (for example `TZ=Europe/Berlin`), or set *Time zone of user emails* to an IANA id. An unknown id falls back to the server's time zone and shows a warning on the status page.
+- On a direct LAN/Tailscale connection, `password` + `code` is accepted like the password alone (the code is not checked there), so apps that stored password + code keep working on the LAN.
 
 **Optional: code-only second step** (setting *Allow the code alone as the second step*, **off by default**). When it is on, the second sign-in can be the user name plus **only the code** in the password field. Password + code keeps working too.
 - The code is still only emailed after a correct password.
@@ -41,13 +45,29 @@ Administrators are treated exactly like everyone else. **API keys keep working a
 
 **Abuse limits:**
 - Emails are sent only after a correct password, with a 60 s resend cooldown, at most 5 per user per hour and 50 per hour for the server.
-- Failed sign-ins are throttled per IP (10 / 5 min; IPv6 per /64) and, for sign-ins through the proxy, per user (10 / 15 min). Direct LAN/Tailscale sign-ins are throttled per IP only, so failures from the internet cannot lock a user out of the LAN.
+- Failed sign-ins are throttled per IP (10 / 5 min; IPv6 per /64) and, for sign-ins through the proxy, per user (10 / 15 min). A wrong code after a correct password counts as a failure here (although Jellyfin does not count it); a stale code or a correct password without a pending code does not. Direct LAN/Tailscale sign-ins are throttled per IP only, so failures from the internet cannot lock a user out of the LAN.
 - If a code email cannot be queued, no code is kept, so the next attempt sends a new one instead of waiting for the resend cooldown.
 - Jellyfin's own lockout is switched off for enrolled users. A lockout disables the account, which would also kill existing sessions, and anyone who knows a username could trigger it.
 
 **Quick Connect** stays available. A code can only be approved from a session that is already signed in. Enrolling a user revokes all of that user's older sessions, so every approving session has passed 2FA or come from LAN/Tailscale. The user is emailed about every Quick Connect sign-in; you can turn that off, or disable Quick Connect for enrolled users altogether.
 
 **Other token paths.** Any token for an enrolled user that did not pass Jelly2FA and is not Quick Connect is revoked immediately, and the admin is alerted. This covers, for example, an SSO plugin that signs users in directly.
+
+### Code reuse (Seerr, Neptune)
+
+Some apps pass the credentials you typed on to another service. [Neptune](https://docs.neptuneplayer.com/getting-started/setup/seerr#signing-in), for example, signs you in to Seerr with the user name and password field you used for Jellyfin, and Seerr then signs in to Jellyfin with them. Seerr uses its own device id (`BOT_seerr_<user>`), its own app name (`Seerr`) and its own IP, so without reuse that sign-in fails: the code was already used by Neptune (403 since 0.0.5.0, so it is no longer counted as a failed sign-in).
+
+With *Additional sign-ins per code* above 0 (off by default), a code that was used successfully can be used that many more times, within *Reuse window* minutes after the first use:
+- only by the **same user**, and only by apps whose name is in *Apps allowed to reuse a code* (default `Seerr,Jellyseerr`, case-insensitive), from any of their devices;
+- with password + code always, and with the code alone only if *Allow the code alone as the second step* is on (Neptune passes on exactly what you typed, so with code-only sign-in Seerr receives only the code);
+- it is not bound to an IP (Seerr signs in from its own address), but you can and should restrict it with *Only from these addresses* to the Seerr host. That list is checked against the real TCP connection to Jellyfin, not against forwarded headers. Seerr sends `X-Forwarded-For` with the user's IP first and retries without it, so a Seerr host on the LAN that connects directly is seen with its own address;
+- wrong codes from listed apps count like wrong codes (the grant ends after *Wrong code entries per code*) and for the failure throttle; a password change, unenrolling or deleting the user ends it.
+
+The code email mentions the reuse. **Trade-off:** app names are chosen by the client. Without an address list, whoever knows a code that was just used (for example by reading the mailbox) can use it again within the window by calling their app "Seerr", without the password if code-only sign-in is on. The status page warns while reuse is on, more strongly without an address list.
+
+Notes:
+- If Seerr reaches Jellyfin **directly from a LAN/Tailscale address**, its retry without `X-Forwarded-For` is a normal direct sign-in: password + code is accepted like the password alone, and a code alone only through reuse.
+- Neptune is closed source. If it only signs in to Seerr later (after the reuse window), reuse does not help; those attempts are answered with 403 and not counted as failed sign-ins. In that case sign in to Seerr with Quick Connect (Seerr 3.4+).
 
 ## Requirements
 
@@ -63,9 +83,9 @@ Administrators are treated exactly like everyone else. **API keys keep working a
      Then install **Jelly2FA** from the **Catalog** (category *Authentication*) and restart Jellyfin.
    - **Manually:** build it (or download the zip from a GitHub release):
      ```sh
-     dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o out/Jelly2FA_0.0.2.0
+     dotnet publish src/Jellyfin.Plugin.Jelly2FA -c Release -o out/Jelly2FA_0.0.5.0
      ```
-     Copy the folder `Jelly2FA_0.0.2.0` (it contains `Jellyfin.Plugin.Jelly2FA.dll` and `meta.json`) into Jellyfin's `plugins` directory, for example `/var/lib/jellyfin/plugins/` or `/config/plugins/` in Docker. Then restart Jellyfin.
+     Copy the folder `Jelly2FA_0.0.5.0` (it contains `Jellyfin.Plugin.Jelly2FA.dll` and `meta.json`) into Jellyfin's `plugins` directory, for example `/var/lib/jellyfin/plugins/` or `/config/plugins/` in Docker. Then restart Jellyfin.
 2. Configure the Jellyfin networking settings below.
 3. Open **Dashboard → Plugins → Jelly2FA** and configure SMTP. Save the SMTP password with its own button; it is stored in `plugins/Jellyfin.Plugin.Jelly2FA/secrets.json` with mode 0600, or comes from the environment variable `JELLY2FA_SMTP_PASSWORD`. Then send a test email.
 4. **While connected over LAN or Tailscale**, enroll each user, including admins, with their email address. Enrolling signs out all existing sessions of that user except the one you are using.
@@ -91,6 +111,24 @@ The example also rate-limits the sign-in routes (not Quick Connect polling), blo
 - If Jellyfin runs in **Docker bridge mode**, LAN clients may appear as the Docker gateway (for example `172.17.0.1`). If nginx also arrives from that address, everyone gets 2FA (safe, but no LAN exemption). Use host networking, or make sure nginx and LAN clients arrive from different addresses.
 - If LAN users connect via the DDNS name (hairpin NAT), they go through nginx and get 2FA. That is intended.
 
+### fail2ban / CrowdSec
+
+- **Jellyfin's log** (CrowdSec `LePresidente/jellyfin-bf`, the usual fail2ban jellyfin filter): they match "Authentication request for … has been denied". Jellyfin writes that line only for a 401. With Jelly2FA that means a wrong password or an unknown code alone; the two-factor step after a correct password is not logged as denied (see *401 or 403* above).
+- **nginx's access log**: CrowdSec's `crowdsecurity/base-http-scenarios` collection contains `LePresidente/http-generic-403-bf`, which bans after about 5 **POST requests with status 403** within a short time, from any route. Every Jelly2FA sign-in produces at least one such 403 (Seerr two, because it retries), plus one per mistyped code. Frequent sign-ins can therefore get a user banned.
+
+To keep that scenario for everything else, whitelist 403 on the sign-in routes only, for example in `/etc/crowdsec/parsers/s02-enrich/jelly2fa-whitelist.yaml` (field names of the hub's `crowdsecurity/nginx-logs` parser; adapt for other proxies), then `sudo systemctl reload crowdsec`:
+
+```yaml
+name: jelly2fa/signin-403-whitelist
+description: "Jelly2FA: 403 on the Jellyfin sign-in routes follows a correct password"
+whitelist:
+  reason: "Jelly2FA two-factor step"
+  expression:
+    - "evt.Meta.http_verb == 'POST' && evt.Meta.http_status == '403' && evt.Meta.http_path matches '(?i)^(/[^?]*)?/users/(authenticatebyname|[0-9a-f-]{32,36}/authenticate)/?([?].*)?$'"
+```
+
+Why that is acceptable: wrong passwords stay 401 and are still counted by every scenario. Guessing codes needs the correct password and is limited by Jelly2FA itself (5 tries per code, codes only emailed after a correct password, 5 emails per user per hour, 10 failures per IP per 5 minutes). Jelly2FA's throttle answers with 403 too, but only after 10 401s that CrowdSec has already seen. Jellyfin's own 403s on these routes (disabled account, remote access not allowed, parental schedule) are hidden as well; they never sign anybody in.
+
 ## What users see
 
 Apps don't know about 2FA. After the first attempt the app shows its usual error. The message differs per app:
@@ -100,12 +138,13 @@ Apps don't know about 2FA. After the first attempt the app shows its usual error
 | Web, Jellyfin Desktop, Android app, Samsung/LG TV | "You are not authorized to access the server at this time…" |
 | Android TV / Google TV | "Unable to connect to server" (misleading; just retry with password+code) |
 | Swiftfin | an HTTP 403 error |
+| Neptune | "Could not connect to server" (misleading; the email explains the next step) |
 | Findroid / Streamyfin / Finamp / Kodi / Roku | an error/"login failed" message |
 
-The email explains the next step. Notes:
+Clients choose this text from the HTTP status alone (Jellyfin sends only `Error processing request.` as the body), so no client can say "password correct". The email does ("Someone entered the correct password…"), and so does Jellyfin's log. The email explains the next step. Notes:
 - Don't put a space between the password and the code (Swiftfin trims spaces).
 - Roku's on-screen keyboard is limited in length (unverified).
-- **Jellyseerr / Seerr**: the user can sign in with **Quick Connect** (Seerr 3.4+). Seerr's library sync uses an API key and is unaffected.
+- **Jellyseerr / Seerr**: the user can sign in with **Quick Connect** (Seerr 3.4+). Seerr's library sync uses an API key and is unaffected. For apps such as Neptune that sign in to Seerr with your Jellyfin credentials, see [Code reuse](#code-reuse-seerr-neptune).
 - **Scripts**: use API keys. They bypass 2FA by design, so treat them like root passwords.
 - **Infuse** (closed source) is untested.
 
@@ -162,7 +201,7 @@ It mails you on every state change, via `sendmail -t` (for example msmtp or post
 - Protects against a remote attacker who knows a password. It does **not** protect against someone who controls the user's mailbox *and* knows the password, a compromised server or admin, or a stolen session token. Tokens don't expire in Jellyfin, so sign out devices you no longer use.
 - Codes travel by email, so the security of the second factor equals the security of the mailbox.
 - A correct password from the internet results in a code email ("Someone entered the correct password…"). Treat that email as an alarm.
-- There is no "remember this device": device ids are chosen by the client and are not secret. One code gives one Jellyfin session, which lasts until sign-out.
+- There is no "remember this device": device ids are chosen by the client and are not secret. One code gives one Jellyfin session, which lasts until sign-out (plus the configured extra sessions for listed apps if code reuse is on).
 - Pending codes and throttle counters are in memory only.
 - The plugin uses an undocumented-but-standard ASP.NET Core hook (`IStartupFilter`) for origin capture. If that ever stops running, every sign-in requires 2FA (fail closed) and the status page warns.
 - **Never rename** `TwoFactorAuthenticationProvider`: its full type name is stored as the provider id of every enrolled user.
@@ -181,6 +220,7 @@ The end-to-end suite runs against the real Jellyfin 12.2 server, with 127.0.0.1 
 - API keys (header and `?ApiKey=`); Quick Connect (allowed, notified, disabled);
 - fail closed without a proxy; password change; throttling without account lockout; remote failures not blocking LAN sign-in;
 - the code-only option (IP binding); unenroll after failed sign-ins (no surprise lockout); a posted configuration without users;
+- 403 instead of 401 after a correct password (Jellyfin's failed-login counter and "has been denied" log lines unchanged); code reuse by a Seerr-like client via the proxy and directly from the LAN, unlisted apps, used-up grants, the address filter; the email time zone;
 - Disable (immediate and after restart), Enable (immediate and at startup, sessions revoked), Uninstall of an active and of a disabled plugin, reinstall;
 - the plugin failing to load (fail closed) and `tools/jelly2fa-recover.sh` with a user name containing a quote.
 
