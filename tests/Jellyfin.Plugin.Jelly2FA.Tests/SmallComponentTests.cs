@@ -178,4 +178,116 @@ public class NotificationTemplateTests
         Assert.Contains("Freigegeben von IP: 203.0.113.5", m.Body, StringComparison.Ordinal);
         Assert.Null(m.HtmlBody);
     }
+
+    private static TimeZoneInfo Berlin => TimeZoneInfo.FindSystemTimeZoneById("Europe/Berlin");
+
+    [Fact]
+    public void Time_Utc()
+    {
+        Assert.Equal("2026-10-17 12:00 UTC", NotificationService.FormatTime(Now, null));
+        Assert.Equal("2026-10-17 12:00 UTC", NotificationService.FormatTime(Now, TimeZoneInfo.Utc));
+        Assert.Equal("2026-10-17 12:00 UTC", NotificationService.FormatTime(Now, TimeZoneInfo.FindSystemTimeZoneById("Etc/UTC")));
+    }
+
+    [Fact]
+    public void Time_Berlin_SummerAndWinter()
+    {
+        Assert.Equal("2026-10-17 14:00 Europe/Berlin (UTC+02:00)", NotificationService.FormatTime(Now, Berlin));
+        Assert.Equal("2026-12-01 13:30 Europe/Berlin (UTC+01:00)", NotificationService.FormatTime(DateTimeOffset.Parse("2026-12-01T12:30:00Z"), Berlin));
+    }
+
+    [Fact]
+    public void Time_NegativeOffset()
+        => Assert.Equal("2026-10-17 08:00 America/New_York (UTC-04:00)", NotificationService.FormatTime(Now, TimeZoneInfo.FindSystemTimeZoneById("America/New_York")));
+
+    [Fact]
+    public void Time_ZoneWithoutName_ShowsOffsetOnly()
+    {
+        var custom = TimeZoneInfo.CreateCustomTimeZone("Local", TimeSpan.FromHours(3), "x", "x");
+        Assert.Equal("2026-10-17 15:00 (UTC+03:00)", NotificationService.FormatTime(Now, custom));
+    }
+
+    [Fact]
+    public void TimeZone_Resolution()
+    {
+        var server = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+        Assert.Same(server, NotificationService.ResolveTimeZone(null, server, out var invalid));
+        Assert.False(invalid);
+        Assert.Same(server, NotificationService.ResolveTimeZone("  ", server, out invalid));
+        Assert.False(invalid);
+        Assert.Equal("Europe/Berlin", NotificationService.ResolveTimeZone(" Europe/Berlin ", server, out invalid).Id);
+        Assert.False(invalid);
+        Assert.Same(server, NotificationService.ResolveTimeZone("Mars/Olympus", server, out invalid));
+        Assert.True(invalid);
+    }
+
+    [Fact]
+    public void CodeEmail_UsesTimeZone()
+    {
+        var m = NotificationService.BuildCodeEmail("en", false, "S", "a@example.com", "alice", "12345678", "Phone", "App", "203.0.113.5", 10, Now, Berlin);
+        Assert.Contains("2026-10-17 14:00 Europe/Berlin (UTC+02:00)", m.Body, StringComparison.Ordinal);
+        Assert.Contains("2026-10-17 14:00 Europe/Berlin (UTC+02:00)", m.HtmlBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("UTC</td>", m.HtmlBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QuickConnectEmail_UsesTimeZone()
+    {
+        var m = NotificationService.BuildQuickConnectEmail("en", "S", "a@example.com", "alice", "Phone", "App", "203.0.113.5", Now, Berlin);
+        Assert.Contains("2026-10-17 14:00 Europe/Berlin (UTC+02:00)", m.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CodeEmail_MentionsReuse()
+    {
+        Assert.DoesNotContain("Exception:", Code("en").Body, StringComparison.Ordinal);
+        var reuse = new ReuseInfo(2, 5, new[] { "Seerr", "Jellyseerr" });
+        var en = NotificationService.BuildCodeEmail("en", true, "S", "a@example.com", "alice", "12345678", "Phone", "App", "203.0.113.5", 10, Now, null, reuse);
+        Assert.Contains("for 5 minutes after you signed in with it, these apps may use the code 2 more time(s)", en.Body, StringComparison.Ordinal);
+        Assert.Contains("Seerr, Jellyseerr", en.Body, StringComparison.Ordinal);
+        var de = NotificationService.BuildCodeEmail("de", true, "S", "a@example.com", "alice", "12345678", "Phone", "App", "203.0.113.5", 10, Now, null, reuse);
+        Assert.Contains("noch 2-mal verwenden", de.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReuseInfo_FromConfig()
+    {
+        var c = new Jellyfin.Plugin.Jelly2FA.Configuration.PluginConfiguration();
+        Assert.Null(ReuseInfo.From(c)); // off by default
+        c.CodeReuseCount = 99;
+        c.CodeReuseMinutes = 0;
+        var r = ReuseInfo.From(c);
+        Assert.NotNull(r);
+        Assert.Equal(CodeReusePolicy.MaxCount, r!.Count);
+        Assert.Equal(1, r.Minutes);
+        Assert.Equal(new[] { "Seerr", "Jellyseerr" }, r.Clients);
+    }
+}
+
+public class CodeReusePolicyTests
+{
+    [Fact]
+    public void Clients_CaseInsensitiveExactMatch()
+    {
+        var c = new Jellyfin.Plugin.Jelly2FA.Configuration.PluginConfiguration { CodeReuseCount = 1, CodeReuseClients = "Seerr; jellyseerr ,seerr" };
+        Assert.Equal(new[] { "Seerr", "jellyseerr" }, CodeReusePolicy.Clients(c));
+        Assert.True(CodeReusePolicy.AllowsClient(c, "seerr"));
+        Assert.True(CodeReusePolicy.AllowsClient(c, " Jellyseerr "));
+        Assert.False(CodeReusePolicy.AllowsClient(c, "Seerr2"));
+        Assert.False(CodeReusePolicy.AllowsClient(c, null));
+        c.CodeReuseCount = 0;
+        Assert.False(CodeReusePolicy.AllowsClient(c, "Seerr"));
+    }
+
+    [Fact]
+    public void Peer_FilteredByAddresses()
+    {
+        var c = new Jellyfin.Plugin.Jelly2FA.Configuration.PluginConfiguration();
+        Assert.True(CodeReusePolicy.AllowsPeer(c, null)); // no list: any
+        c.CodeReuseAddresses = "10.0.0.5, 172.18.0.0/16";
+        Assert.True(CodeReusePolicy.AllowsPeer(c, System.Net.IPAddress.Parse("10.0.0.5")));
+        Assert.True(CodeReusePolicy.AllowsPeer(c, System.Net.IPAddress.Parse("::ffff:172.18.3.4")));
+        Assert.False(CodeReusePolicy.AllowsPeer(c, System.Net.IPAddress.Parse("10.0.0.6")));
+        Assert.False(CodeReusePolicy.AllowsPeer(c, null));
+    }
 }

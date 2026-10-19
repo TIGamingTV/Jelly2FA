@@ -36,6 +36,12 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the language of user emails ("en" or "de"; anything else falls back to English).</summary>
     public string EmailLanguage { get; set; } = "en";
 
+    /// <summary>
+    /// Gets or sets the time zone used for times in user emails (IANA id such as "Europe/Berlin").
+    /// Empty = the server's local time zone (the TZ environment variable in Docker).
+    /// </summary>
+    public string EmailTimeZone { get; set; } = string.Empty;
+
     // ---- Network / origin ----
 
     /// <summary>
@@ -102,6 +108,26 @@ public class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>Gets or sets the user failure window.</summary>
     public int UserWindowMinutes { get; set; } = 15;
+
+    // ---- Code reuse (apps that sign in with the credentials of another app, e.g. Seerr via Neptune) ----
+
+    /// <summary>
+    /// Gets or sets how many additional sign-ins a code allows after it was used successfully
+    /// (0 = off, the default). Only apps listed in <see cref="CodeReuseClients"/> may reuse a code.
+    /// </summary>
+    public int CodeReuseCount { get; set; }
+
+    /// <summary>Gets or sets how long (minutes, 1-60) after its first successful use a code may be reused.</summary>
+    public int CodeReuseMinutes { get; set; } = 5;
+
+    /// <summary>Gets or sets the app (client) names allowed to reuse a code, comma separated, case-insensitive.</summary>
+    public string CodeReuseClients { get; set; } = "Seerr,Jellyseerr";
+
+    /// <summary>
+    /// Gets or sets optional IPs/CIDRs (comma separated). If set, a code can only be reused when the TCP
+    /// connection to Jellyfin comes from one of these addresses (for example the Seerr host).
+    /// </summary>
+    public string CodeReuseAddresses { get; set; } = string.Empty;
 
     // ---- Enrollment ----
 

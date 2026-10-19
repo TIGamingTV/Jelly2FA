@@ -130,6 +130,17 @@ public sealed class HealthService
             }
         }
 
+        AddCodeReuseWarnings(config, r);
+
+        if (!string.IsNullOrWhiteSpace(config.EmailTimeZone))
+        {
+            NotificationService.ResolveTimeZone(config.EmailTimeZone, TimeZoneInfo.Local, out var invalidZone);
+            if (invalidZone)
+            {
+                r.Warnings.Add($"Unknown email time zone '{EmailAddress.SingleLine(config.EmailTimeZone)}': emails use the server's time zone ({TimeZoneInfo.Local.Id}). Use an IANA id such as Europe/Berlin.");
+            }
+        }
+
         if (!r.SmtpConfigured)
         {
             r.Problems.Add("SMTP is not configured: remote sign-ins of enrolled users are impossible.");
@@ -179,6 +190,36 @@ public sealed class HealthService
 
         r.Healthy = r.Problems.Count == 0;
         return r;
+    }
+
+    private static void AddCodeReuseWarnings(Configuration.PluginConfiguration config, StatusReport r)
+    {
+        foreach (var entry in CodeReusePolicy.InvalidAddresses(config))
+        {
+            r.Warnings.Add($"Code reuse: '{EmailAddress.SingleLine(entry)}' is not an IP address or CIDR and is ignored.");
+        }
+
+        if (!CodeReusePolicy.Enabled(config))
+        {
+            if (config.CodeReuseCount > 0)
+            {
+                r.Warnings.Add("Code reuse has a count but no apps are listed, so it is off.");
+            }
+
+            return;
+        }
+
+        var clients = string.Join(", ", CodeReusePolicy.Clients(config).Select(EmailAddress.SingleLine));
+        var count = CodeReusePolicy.Count(config);
+        var minutes = CodeReusePolicy.Minutes(config);
+        if (string.IsNullOrWhiteSpace(config.CodeReuseAddresses))
+        {
+            r.Warnings.Add($"Code reuse is on for {clients} from ANY address: app names are chosen by the client, so whoever knows a code that was just used can use it {count} more time(s) within {minutes} minutes by calling their app '{CodeReusePolicy.Clients(config)[0]}'. Restrict it to the Seerr host with 'Only from these addresses'.");
+        }
+        else
+        {
+            r.Warnings.Add($"Code reuse is on: a used code can be used {count} more time(s) within {minutes} minutes by {clients} from {EmailAddress.SingleLine(config.CodeReuseAddresses)}.");
+        }
     }
 }
 

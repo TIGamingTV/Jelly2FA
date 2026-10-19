@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Net;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -49,6 +51,7 @@ public sealed class NotificationService : INotificationService
     private readonly EmailQueue _queue;
     private readonly IConfigProvider _config;
     private readonly RateLimiter _limiter;
+    private readonly TimeProvider _time;
     private readonly ILogger<NotificationService> _logger;
 
     /// <summary>
@@ -57,14 +60,19 @@ public sealed class NotificationService : INotificationService
     /// <param name="queue">Queue.</param>
     /// <param name="config">Config.</param>
     /// <param name="limiter">Rate limiter.</param>
+    /// <param name="time">Time provider (current time and the server's local time zone).</param>
     /// <param name="logger">Logger.</param>
-    public NotificationService(EmailQueue queue, IConfigProvider config, RateLimiter limiter, ILogger<NotificationService> logger)
+    public NotificationService(EmailQueue queue, IConfigProvider config, RateLimiter limiter, TimeProvider time, ILogger<NotificationService> logger)
     {
         _queue = queue;
         _config = config;
         _limiter = limiter;
+        _time = time;
         _logger = logger;
     }
+
+    /// <summary>Gets the time zone used for user emails (configured override, else the server's zone).</summary>
+    internal TimeZoneInfo EmailZone => ResolveTimeZone(_config.Current.EmailTimeZone, _time.LocalTimeZone, out _);
 
     /// <inheritdoc />
     public bool SendCode(string email, string userName, string code, string? device, string? client, string? clientIp, int lifetimeMinutes)
@@ -81,7 +89,9 @@ public sealed class NotificationService : INotificationService
             client,
             clientIp,
             lifetimeMinutes,
-            DateTimeOffset.UtcNow);
+            _time.GetUtcNow(),
+            EmailZone,
+            ReuseInfo.From(c));
         return _queue.Enqueue(message);
     }
 
@@ -89,7 +99,7 @@ public sealed class NotificationService : INotificationService
     public void NotifyQuickConnect(string email, string userName, string? device, string? client, string? approverIp)
     {
         var c = _config.Current;
-        _queue.Enqueue(BuildQuickConnectEmail(c.EmailLanguage, c.ServerDisplayName, email, userName, device, client, approverIp, DateTimeOffset.UtcNow));
+        _queue.Enqueue(BuildQuickConnectEmail(c.EmailLanguage, c.ServerDisplayName, email, userName, device, client, approverIp, _time.GetUtcNow(), EmailZone));
     }
 
     /// <inheritdoc />
@@ -111,6 +121,57 @@ public sealed class NotificationService : INotificationService
         _queue.Enqueue(new EmailMessage(to, $"[Jelly2FA] {server}: {subject}", body + Environment.NewLine));
     }
 
+    /// <summary>Resolves the time zone for user emails.</summary>
+    /// <param name="id">Configured IANA time zone id (e.g. "Europe/Berlin"); empty = <paramref name="serverZone"/>.</param>
+    /// <param name="serverZone">The server's local time zone.</param>
+    /// <param name="invalid">True if <paramref name="id"/> is set but unknown (the server zone is used then).</param>
+    /// <returns>The time zone.</returns>
+    internal static TimeZoneInfo ResolveTimeZone(string? id, TimeZoneInfo serverZone, out bool invalid)
+    {
+        invalid = false;
+        var trimmed = id?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return serverZone;
+        }
+
+        if (TimeZoneInfo.TryFindSystemTimeZoneById(trimmed, out var zone))
+        {
+            return zone;
+        }
+
+        invalid = true;
+        return serverZone;
+    }
+
+    /// <summary>Formats a time for emails, e.g. "2026-10-19 14:05 Europe/Berlin (UTC+02:00)" or "2026-10-19 12:05 UTC".</summary>
+    /// <param name="now">The instant.</param>
+    /// <param name="zone">Time zone (null = UTC).</param>
+    /// <returns>The text.</returns>
+    internal static string FormatTime(DateTimeOffset now, TimeZoneInfo? zone)
+    {
+        zone ??= TimeZoneInfo.Utc;
+        var local = TimeZoneInfo.ConvertTime(now, zone);
+        var stamp = local.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        if (IsUtc(zone))
+        {
+            return stamp + " UTC";
+        }
+
+        var offset = local.Offset;
+        var utc = "UTC" + (offset < TimeSpan.Zero ? "-" : "+") + offset.Duration().ToString(@"hh\:mm", CultureInfo.InvariantCulture);
+        var name = EmailAddress.SingleLine(zone.Id);
+        return name.Length == 0 || string.Equals(name, "Local", StringComparison.OrdinalIgnoreCase)
+            ? $"{stamp} ({utc})"
+            : $"{stamp} {name} ({utc})";
+    }
+
+    private static bool IsUtc(TimeZoneInfo zone)
+        => ReferenceEquals(zone, TimeZoneInfo.Utc)
+           || (zone.BaseUtcOffset == TimeSpan.Zero
+               && !zone.SupportsDaylightSavingTime
+               && zone.Id is "UTC" or "Etc/UTC" or "Etc/UCT" or "UCT" or "Universal" or "Etc/Universal" or "Zulu" or "Etc/Zulu" or "GMT" or "Etc/GMT" or "Coordinated Universal Time");
+
     /// <summary>Builds the sign-in code email (plain text + HTML with the code highlighted).</summary>
     /// <param name="language">Language code ("en", "de"; others fall back to English).</param>
     /// <param name="codeOnly">Whether the second step takes the code alone.</param>
@@ -123,6 +184,8 @@ public sealed class NotificationService : INotificationService
     /// <param name="clientIp">Client IP.</param>
     /// <param name="lifetimeMinutes">Validity.</param>
     /// <param name="now">Current time.</param>
+    /// <param name="zone">Time zone of the time shown (null = UTC).</param>
+    /// <param name="reuse">Code reuse settings (null = off).</param>
     /// <returns>The message.</returns>
     internal static EmailMessage BuildCodeEmail(
         string? language,
@@ -135,15 +198,26 @@ public sealed class NotificationService : INotificationService
         string? client,
         string? clientIp,
         int lifetimeMinutes,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        TimeZoneInfo? zone = null,
+        ReuseInfo? reuse = null)
     {
         var t = Texts.For(language);
         var server = EmailAddress.SingleLine(serverName);
         var user = Clean(userName, t);
-        var time = now.UtcDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
+        var time = FormatTime(now, zone);
         var howTo = codeOnly ? t.HowToCodeOnly : t.HowToPasswordPlusCode;
         var example = codeOnly ? null : t.ExamplePassword + code;
         var validity = string.Format(CultureInfo.InvariantCulture, t.Validity, lifetimeMinutes);
+        if (reuse is { Count: > 0 } r && r.Clients.Count > 0)
+        {
+            validity += " " + string.Format(
+                CultureInfo.InvariantCulture,
+                t.Reuse,
+                r.Count,
+                r.Minutes,
+                string.Join(", ", r.Clients.Select(EmailAddress.SingleLine)));
+        }
         var details = new (string Label, string Value)[]
         {
             (t.Device, Client(device, t)),
@@ -210,6 +284,7 @@ public sealed class NotificationService : INotificationService
     /// <param name="client">Client name.</param>
     /// <param name="approverIp">Approver IP.</param>
     /// <param name="now">Current time.</param>
+    /// <param name="zone">Time zone of the time shown (null = UTC).</param>
     /// <returns>The message.</returns>
     internal static EmailMessage BuildQuickConnectEmail(
         string? language,
@@ -219,7 +294,8 @@ public sealed class NotificationService : INotificationService
         string? device,
         string? client,
         string? approverIp,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        TimeZoneInfo? zone = null)
     {
         var t = Texts.For(language);
         var server = EmailAddress.SingleLine(serverName);
@@ -231,7 +307,7 @@ public sealed class NotificationService : INotificationService
             .AppendLine(CultureInfo.InvariantCulture, $"{(t.Device + ":").PadRight(8)}{Client(device, t)}")
             .AppendLine(CultureInfo.InvariantCulture, $"{(t.App + ":").PadRight(8)}{Client(client, t)}")
             .AppendLine(CultureInfo.InvariantCulture, $"{t.ApprovedFromIp}: {Client(approverIp, t)}")
-            .AppendLine(CultureInfo.InvariantCulture, $"{(t.Time + ":").PadRight(8)}{now.UtcDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)} UTC")
+            .AppendLine(CultureInfo.InvariantCulture, $"{(t.Time + ":").PadRight(8)}{FormatTime(now, zone)}")
             .AppendLine()
             .AppendLine(t.QcWarning)
             .ToString();
@@ -268,6 +344,7 @@ public sealed class NotificationService : INotificationService
             ExampleLabel = "For example:",
             ExamplePassword = "MyPassword",
             Validity = "The code is valid for {0} minutes, works once, and only on the device that requested it.",
+            Reuse = "Exception: for {1} minutes after you signed in with it, these apps may use the code {0} more time(s), for example when your app signs you in to them: {2}.",
             Device = "Device",
             App = "App",
             Ip = "IP",
@@ -290,6 +367,7 @@ public sealed class NotificationService : INotificationService
             ExampleLabel = "Zum Beispiel:",
             ExamplePassword = "MeinPasswort",
             Validity = "Der Code ist {0} Minuten gültig, funktioniert nur einmal und nur auf dem Gerät, das ihn angefordert hat.",
+            Reuse = "Ausnahme: {1} Minuten lang nach deiner Anmeldung damit dürfen diese Apps den Code noch {0}-mal verwenden, zum Beispiel wenn deine App dich dort anmeldet: {2}.",
             Device = "Gerät",
             App = "App",
             Ip = "IP",
@@ -317,6 +395,8 @@ public sealed class NotificationService : INotificationService
         public required string ExamplePassword { get; init; }
 
         public required string Validity { get; init; }
+
+        public required string Reuse { get; init; }
 
         public required string Device { get; init; }
 

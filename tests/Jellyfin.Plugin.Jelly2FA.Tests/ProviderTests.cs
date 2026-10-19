@@ -59,25 +59,26 @@ public class ProviderTests
         AuthorizationInfoOverride = ctx => Task.FromResult(new AuthorizationInfo
         {
             DeviceId = (string?)ctx.Items["dev"] ?? "dev-1",
-            Client = "Test Client",
+            Client = (string?)ctx.Items["client"] ?? "Test Client",
             Device = "Test Device",
             Version = "1.0",
         }),
     };
 
-    private void Request(string path = "/Users/AuthenticateByName", string ip = "203.0.113.5", string device = "dev-1", bool authenticated = false)
+    private void Request(string path = "/Users/AuthenticateByName", string ip = "203.0.113.5", string device = "dev-1", bool authenticated = false, string client = "Test Client", string peer = "192.168.1.10")
     {
         var ctx = new DefaultHttpContext();
         ctx.Request.Method = "POST";
         ctx.Request.Path = path;
         ctx.Connection.RemoteIpAddress = IPAddress.Parse(ip);
         ctx.Items["dev"] = device;
+        ctx.Items["client"] = client;
         if (authenticated)
         {
             ctx.User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim("x", "y") }, "test"));
         }
 
-        OriginCaptureMiddleware.Set(ctx, new RequestOrigin(IPAddress.Parse("192.168.1.10"), !_trusted));
+        OriginCaptureMiddleware.Set(ctx, new RequestOrigin(IPAddress.Parse(peer), !_trusted));
         _accessor.HttpContext = ctx;
     }
 
@@ -109,8 +110,10 @@ public class ProviderTests
         await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
         var code = Assert.Single(_notifications.Codes);
 
+        // Correct password + wrong code: 403 (not a failed sign-in for Jellyfin), message says the password was right.
         Request();
-        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(Password + (code == "00000000" ? "00000001" : "00000000")));
+        var wrong = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + (code == "00000000" ? "00000001" : "00000000")));
+        Assert.Contains("password correct", wrong.Message, StringComparison.Ordinal);
 
         Request();
         var ok = await Auth(Password + code);
@@ -118,7 +121,20 @@ public class ProviderTests
         Assert.True(_approvals.TryConsume(_user.Id, "dev-1"));
 
         Request();
-        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(Password + code)); // replay
+        var replay = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + code)); // replay: stale, no token
+        Assert.Contains("no longer valid", replay.Message, StringComparison.Ordinal);
+        Assert.False(_approvals.TryConsume(_user.Id, "dev-1"));
+    }
+
+    [Fact]
+    public async Task Remote_FirstStep_MessageSaysPasswordCorrect()
+    {
+        Request();
+        var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Contains("password correct, a sign-in code was sent", ex.Message, StringComparison.Ordinal);
+        Request();
+        ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Contains("already sent", ex.Message, StringComparison.Ordinal); // cooldown
     }
 
     [Fact]
@@ -128,7 +144,54 @@ public class ProviderTests
         await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
         var code = Assert.Single(_notifications.Codes);
         Request(device: "dev-2");
-        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(Password + code));
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + code)); // password correct: 403, no token
+        Assert.False(_approvals.TryConsume(_user.Id, "dev-2"));
+        Request(device: "dev-1");
+        await Auth(Password + code); // still pending for the requesting device
+    }
+
+    [Fact]
+    public async Task Remote_CorrectPasswordWithoutPendingCode_403_NotCounted()
+    {
+        for (var i = 0; i < 15; i++)
+        {
+            Request();
+            var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + "12345678"));
+            Assert.Contains("no code is pending", ex.Message, StringComparison.Ordinal);
+        }
+
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Single(_notifications.Codes); // not throttled
+    }
+
+    [Fact]
+    public async Task Remote_CorrectPasswordWrongCode_CountsForThrottle()
+    {
+        _config.MaxCodeAttempts = 100;
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        var code = _notifications.Codes.Single();
+        var wrong = code == "00000000" ? "00000001" : "00000000";
+        for (var i = 0; i < 10; i++)
+        {
+            Request();
+            var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + wrong));
+            Assert.Contains("code is wrong", ex.Message, StringComparison.Ordinal);
+        }
+
+        Request();
+        var throttled = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + code));
+        Assert.Contains("Too many", throttled.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Remote_WrongPasswordWithCode_401()
+    {
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrongpw" + _notifications.Codes.Single()));
     }
 
     [Fact]
@@ -181,7 +244,8 @@ public class ProviderTests
         if (_notifications.Codes[0] != _notifications.Codes[1])
         {
             Request();
-            await Assert.ThrowsAsync<AuthenticationException>(() => Auth(Password + _notifications.Codes[0]));
+            var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + _notifications.Codes[0]));
+            Assert.Contains("no longer valid", ex.Message, StringComparison.Ordinal);
         }
 
         Request();
@@ -216,7 +280,10 @@ public class ProviderTests
         var code = _notifications.Codes.Single();
         _user.Password = FakeCrypto.Hash("NewPassword9"); // hash changed by someone else
         Request();
-        await Assert.ThrowsAsync<AuthenticationException>(() => Provider().Authenticate("alice", "NewPassword9" + code, _user));
+        await Assert.ThrowsAsync<SecurityException>(() => Provider().Authenticate("alice", "NewPassword9" + code, _user));
+        Assert.False(_approvals.TryConsume(_user.Id, "dev-1"));
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Provider().Authenticate("alice", Password + code, _user)); // old password
     }
 
     [Fact]
@@ -279,7 +346,10 @@ public class ProviderTests
         await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
         var code = _notifications.Codes.Single();
         Request();
-        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code));
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code)); // known code: 403, but never accepted alone
+        Assert.False(_approvals.TryConsume(_user.Id, "dev-1"));
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth("12345678" == code ? "87654321" : "12345678")); // unknown code: 401
         Request();
         await Auth(Password + code); // code was not consumed
     }
@@ -299,7 +369,8 @@ public class ProviderTests
         Assert.True(_approvals.TryConsume(_user.Id, "dev-1"));
 
         Request();
-        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code)); // replay
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code)); // replay: stale (403), no token
+        Assert.False(_approvals.TryConsume(_user.Id, "dev-1"));
     }
 
     [Fact]
@@ -321,7 +392,8 @@ public class ProviderTests
         await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
         var code = _notifications.Codes.Single();
         Request(device: "dev-2");
-        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code));
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code)); // known code, but not for this device: 403, no token
+        Assert.False(_approvals.TryConsume(_user.Id, "dev-2"));
     }
 
     [Fact]
@@ -340,7 +412,8 @@ public class ProviderTests
         }
 
         Request();
-        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code)); // invalidated after 2 wrong entries
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code)); // invalidated after 2 wrong entries (stale now)
+        Assert.False(_approvals.TryConsume(_user.Id, "dev-1"));
     }
 
     [Fact]
@@ -500,6 +573,188 @@ public class ProviderTests
 
         Request(path: "/Users/Password", authenticated: true);
         await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+    }
+
+    // ---- code reuse (Neptune signs in, then passes the same credentials to Seerr) ----
+
+    private async Task<string> NeptuneSignsIn(bool codeOnly = true)
+    {
+        Request(device: "neptune-1", client: "Neptune");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        var code = _notifications.Codes[^1];
+        Request(device: "neptune-1", client: "Neptune");
+        await Auth(codeOnly ? code : Password + code);
+        Assert.True(_approvals.TryConsume(_user.Id, "neptune-1"));
+        return code;
+    }
+
+    private void SeerrRequest(string device = "Qk9UX3NlZXJyX2FsaWNl", string client = "Seerr", string ip = "198.51.100.20", string peer = "192.168.1.10")
+        => Request(device: device, client: client, ip: ip, peer: peer);
+
+    private void EnableReuse(int count = 2)
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        _config.CodeReuseCount = count;
+        _config.CodeReuseMinutes = 5;
+    }
+
+    [Fact]
+    public async Task Reuse_OffByDefault_SeerrGetsStale403()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        var code = await NeptuneSignsIn();
+        SeerrRequest();
+        var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(code));
+        Assert.Contains("no longer valid", ex.Message, StringComparison.Ordinal);
+        Assert.False(_approvals.TryConsume(_user.Id, "Qk9UX3NlZXJyX2FsaWNl"));
+    }
+
+    [Fact]
+    public async Task Reuse_Seerr_CodeOnly_OtherDeviceAndIp_LimitedUses()
+    {
+        EnableReuse(count: 2);
+        var code = await NeptuneSignsIn();
+
+        SeerrRequest();
+        Assert.Equal("alice", (await Auth(code)).Username);
+        Assert.True(_approvals.TryConsume(_user.Id, "Qk9UX3NlZXJyX2FsaWNl"));
+
+        SeerrRequest(client: "seerr", device: "other-seerr-device", ip: "198.51.100.21");
+        await Auth(code); // second reuse, case-insensitive app name
+
+        SeerrRequest();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code)); // used up: stale 403
+    }
+
+    [Fact]
+    public async Task Reuse_UnlistedApp_AndOriginalDevice_CannotReuse()
+    {
+        EnableReuse();
+        var code = await NeptuneSignsIn();
+        SeerrRequest(client: "Overseerr");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code));
+        Request(device: "neptune-1", client: "Neptune");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code));
+        Assert.False(_approvals.TryConsume(_user.Id, "neptune-1"));
+        SeerrRequest();
+        await Auth(code); // grant untouched by the refused attempts
+    }
+
+    [Fact]
+    public async Task Reuse_WindowExpires()
+    {
+        EnableReuse();
+        var code = await NeptuneSignsIn();
+        _time.Advance(TimeSpan.FromMinutes(5));
+        SeerrRequest();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code));
+    }
+
+    [Fact]
+    public async Task Reuse_CodeAlone_OnlyWithCodeOnlyOption()
+    {
+        _config.CodeReuseCount = 2;
+        var code = await NeptuneSignsIn(codeOnly: false);
+        SeerrRequest();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code)); // code alone never accepted without the option
+        SeerrRequest();
+        await Auth(Password + code); // password + code is
+    }
+
+    [Fact]
+    public async Task Reuse_PasswordPlusCode_WrongPassword_401()
+    {
+        _config.CodeReuseCount = 2;
+        var code = await NeptuneSignsIn(codeOnly: false);
+        SeerrRequest();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + code));
+    }
+
+    [Fact]
+    public async Task Reuse_AddressFilter_UsesRealPeer()
+    {
+        EnableReuse();
+        _config.CodeReuseAddresses = "10.0.0.5";
+        var code = await NeptuneSignsIn();
+        SeerrRequest(peer: "192.168.1.10", ip: "10.0.0.5"); // the forwarded client IP does not count
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code));
+        SeerrRequest(peer: "10.0.0.5");
+        await Auth(code);
+    }
+
+    [Fact]
+    public async Task Reuse_WrongCodesFromListedApp_Counted_AndRevokeGrant()
+    {
+        EnableReuse();
+        _config.MaxCodeAttempts = 2;
+        var code = await NeptuneSignsIn();
+        var wrong = code == "00000000" ? "00000001" : "00000000";
+        SeerrRequest();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(wrong));
+        SeerrRequest();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(wrong));
+        SeerrRequest();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code)); // grant revoked, code only stale
+        Assert.False(_store.HasReuseGrant(_user.Id));
+    }
+
+    [Fact]
+    public async Task Reuse_PasswordChange_EndsGrant()
+    {
+        EnableReuse();
+        var code = await NeptuneSignsIn();
+        await Provider().ChangePassword(_user, "Another1");
+        SeerrRequest();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code)); // grant and known codes dropped
+    }
+
+    [Fact]
+    public async Task Reuse_DirectConnection_CodeOnly()
+    {
+        EnableReuse();
+        var code = await NeptuneSignsIn();
+        _trusted = true; // Seerr retries without X-Forwarded-For from a LAN address
+        SeerrRequest(ip: "192.168.1.30", peer: "192.168.1.30");
+        await Auth(code);
+    }
+
+    [Fact]
+    public async Task StaleCodes_AreNotCountedAsFailures()
+    {
+        _config.AllowCodeOnlySecondStep = true;
+        var code = await NeptuneSignsIn();
+        for (var i = 0; i < 20; i++)
+        {
+            SeerrRequest();
+            await Assert.ThrowsAsync<SecurityException>(() => Auth(code));
+            Request(device: "neptune-1", client: "Neptune");
+            await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + code));
+        }
+
+        _time.Advance(TimeSpan.FromSeconds(61));
+        await NeptuneSignsIn(); // neither the IP nor the user is throttled
+    }
+
+    [Fact]
+    public async Task Direct_PasswordFollowedByCode_IsPasswordOnly()
+    {
+        _trusted = true;
+        Request();
+        await Auth(Password + "12345678");
+        Assert.True(_approvals.TryConsume(_user.Id, "dev-1"));
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + "12345678"));
+    }
+
+    [Fact]
+    public async Task Direct_StaleCodeOnly_403_UnknownCode_401()
+    {
+        var code = await NeptuneSignsIn(codeOnly: false);
+        _trusted = true;
+        Request(ip: "192.168.1.30", peer: "192.168.1.30");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(code));
+        Request(ip: "192.168.1.30", peer: "192.168.1.30");
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code == "12345678" ? "87654321" : "12345678"));
     }
 
     [Fact]

@@ -292,6 +292,36 @@ public sealed class LifecycleTests : IDisposable
         Assert.False(Health(Array.Empty<string>()).Healthy);
         Assert.True(Health(new[] { "192.168.1.10" }).Healthy);
     }
+
+    [Fact]
+    public void Health_CodeReuse_Warnings()
+    {
+        AddUser("alice", ProviderIds.Jelly2Fa);
+        Assert.DoesNotContain(Health(new[] { "192.168.1.10" }).Warnings, w => w.Contains("reuse", StringComparison.OrdinalIgnoreCase));
+
+        _config.CodeReuseCount = 2;
+        var report = Health(new[] { "192.168.1.10" });
+        Assert.True(report.Healthy);
+        Assert.Contains(report.Warnings, w => w.Contains("from ANY address", StringComparison.Ordinal));
+
+        _config.CodeReuseAddresses = "10.0.0.5, not-an-ip";
+        report = Health(new[] { "192.168.1.10" });
+        Assert.DoesNotContain(report.Warnings, w => w.Contains("from ANY address", StringComparison.Ordinal));
+        Assert.Contains(report.Warnings, w => w.Contains("'not-an-ip' is not an IP address", StringComparison.Ordinal));
+
+        _config.CodeReuseClients = " , ";
+        Assert.Contains(Health(new[] { "192.168.1.10" }).Warnings, w => w.Contains("no apps are listed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Health_InvalidEmailTimeZone_Warning()
+    {
+        AddUser("alice", ProviderIds.Jelly2Fa);
+        _config.EmailTimeZone = "Europe/Berlin";
+        Assert.DoesNotContain(Health(new[] { "192.168.1.10" }).Warnings, w => w.Contains("time zone", StringComparison.Ordinal));
+        _config.EmailTimeZone = "Mars/Olympus";
+        Assert.Contains(Health(new[] { "192.168.1.10" }).Warnings, w => w.Contains("Unknown email time zone 'Mars/Olympus'", StringComparison.Ordinal));
+    }
 }
 
 /// <summary>Small helpers added for the 0.0.2.0 fixes.</summary>

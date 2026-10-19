@@ -30,6 +30,7 @@
                 <div class="inputContainer"><label class="inputLabel" for="AdminAlertEmail">Administrator alert email</label><input id="AdminAlertEmail" type="email" is="emby-input" /></div>
                 <div class="inputContainer"><label class="inputLabel" for="ServerDisplayName">Server name in emails</label><input id="ServerDisplayName" type="text" is="emby-input" /></div>
                 <div class="selectContainer"><label class="selectLabel" for="EmailLanguage">Language of user emails</label><select id="EmailLanguage" is="emby-select"><option value="en">English</option><option value="de">Deutsch</option></select><div class="fieldDescription">Used for sign-in code and Quick Connect emails. Administrator alerts stay in English.</div></div>
+                <div class="inputContainer"><label class="inputLabel" for="EmailTimeZone">Time zone of user emails</label><input id="EmailTimeZone" type="text" is="emby-input" placeholder="server time zone" /><div class="fieldDescription">Empty: the server's time zone (in Docker set the TZ environment variable, e.g. TZ=Europe/Berlin). Otherwise an IANA time zone id such as Europe/Berlin.</div></div>
 
                 <h3>Network</h3>
                 <div class="inputContainer"><label class="inputLabel" for="ProxyAddresses">Reverse proxy addresses</label><input id="ProxyAddresses" type="text" is="emby-input" /><div class="fieldDescription">IPs/CIDRs of nginx as seen by Jellyfin, comma separated. Jellyfin's "Known proxies" are always included. If no proxy is known, everyone needs 2FA (fail closed).</div></div>
@@ -43,6 +44,13 @@
 
                 <h3>Second step</h3>
                 <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="AllowCodeOnlySecondStep" type="checkbox" is="emby-checkbox" /><span>Allow the code alone as the second step (user name + code instead of password + code)</span></label><div class="fieldDescription">The code is still only sent after a correct password and only works once, on the same device/app and from the same IP that requested it. Trade-off: whoever can read the user's mailbox (and copies the device details from the same network) can use a pending code without retyping the password. Password + code keeps working.</div></div>
+
+                <h3>Code reuse (Seerr and similar apps)</h3>
+                <p class="fieldDescription">Some apps pass the credentials you typed on to another service. Neptune, for example, signs in to Seerr with the same user name and password field, and Seerr then signs in to Jellyfin with them. Without reuse that second sign-in fails because the code was already used. Off when the number is 0.</p>
+                <div class="inputContainer"><label class="inputLabel" for="CodeReuseCount">Additional sign-ins per code (0 = off)</label><input id="CodeReuseCount" type="number" min="0" max="10" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="CodeReuseMinutes">Reuse window after the first use (minutes, 1-60)</label><input id="CodeReuseMinutes" type="number" min="1" max="60" is="emby-input" /></div>
+                <div class="inputContainer"><label class="inputLabel" for="CodeReuseClients">Apps allowed to reuse a code</label><input id="CodeReuseClients" type="text" is="emby-input" /><div class="fieldDescription">App names as sent by the client, comma separated, case-insensitive (Seerr sends "Seerr"). Reuse works for the same user only, from any device of these apps; with "code alone" enabled the code alone is accepted, too.</div></div>
+                <div class="inputContainer"><label class="inputLabel" for="CodeReuseAddresses">Only from these addresses (recommended)</label><input id="CodeReuseAddresses" type="text" is="emby-input" /><div class="fieldDescription">IPs/CIDRs of the Seerr host as Jellyfin sees the connection (not forwarded headers), comma separated. Empty: any address. App names are chosen by the client, so without this list anyone who knows a code that was just used can reuse it by calling their app "Seerr".</div></div>
 
                 <h3>Limits</h3>
                 <div class="inputContainer"><label class="inputLabel" for="CodeLifetimeMinutes">Code lifetime (minutes, 1-60)</label><input id="CodeLifetimeMinutes" type="number" min="1" max="60" is="emby-input" /></div>
@@ -73,8 +81,8 @@
         (function () {
             var pluginId = 'aeb8e07d-2227-4d18-ad2f-7f49c81db71b';
             var page = document.querySelector('#Jelly2FAConfigPage');
-            var textFields = ['SmtpHost', 'SmtpUsername', 'FromAddress', 'FromName', 'AdminAlertEmail', 'ServerDisplayName', 'ProxyAddresses', 'TrustedDirectNetworks'];
-            var numberFields = ['SmtpPort', 'CodeLifetimeMinutes', 'MaxCodeAttempts', 'MaxPendingPerUser', 'ResendCooldownSeconds', 'MaxEmailsPerUserPerHour', 'MaxEmailsPerHourGlobal', 'MaxFailuresPerIp', 'IpWindowMinutes', 'MaxFailuresPerUser', 'UserWindowMinutes'];
+            var textFields = ['SmtpHost', 'SmtpUsername', 'FromAddress', 'FromName', 'AdminAlertEmail', 'ServerDisplayName', 'EmailTimeZone', 'ProxyAddresses', 'TrustedDirectNetworks', 'CodeReuseClients', 'CodeReuseAddresses'];
+            var numberFields = ['SmtpPort', 'CodeLifetimeMinutes', 'MaxCodeAttempts', 'MaxPendingPerUser', 'ResendCooldownSeconds', 'MaxEmailsPerUserPerHour', 'MaxEmailsPerHourGlobal', 'MaxFailuresPerIp', 'IpWindowMinutes', 'MaxFailuresPerUser', 'UserWindowMinutes', 'CodeReuseCount', 'CodeReuseMinutes'];
             var boolFields = ['TrustJellyfinLocalNetworks', 'TrustLoopback', 'AllowQuickConnect', 'NotifyOnQuickConnect', 'AllowCodeOnlySecondStep'];
 
             function esc(s) {

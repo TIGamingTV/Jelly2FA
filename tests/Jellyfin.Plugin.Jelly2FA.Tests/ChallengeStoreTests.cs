@@ -87,8 +87,121 @@ public class ChallengeStoreTests
         }
         while (second == first);
 
-        Assert.Equal(VerifyResult.WrongCode, store.Verify(Bind(), first, Fp, 5));
+        Assert.Equal(VerifyResult.Stale, store.Verify(Bind(), first, Fp, 5)); // replaced: known, not counted
         Assert.Equal(VerifyResult.Success, store.Verify(Bind(), second, Fp, 5));
+    }
+
+    [Fact]
+    public void StaleCodes_AreNotCountedAsWrongEntries()
+    {
+        var store = Store();
+        var first = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        string second;
+        do
+        {
+            second = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        }
+        while (second == first);
+
+        for (var i = 0; i < 10; i++)
+        {
+            Assert.Equal(VerifyResult.Stale, store.Verify(Bind(), first, Fp, 2));
+        }
+
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), second, Fp, 2));
+    }
+
+    [Fact]
+    public void KnownCodes_ArePerUser_Bounded_AndForgotten()
+    {
+        var store = Store();
+        var user = Bind().UserId;
+        var codes = new List<string>();
+        for (var i = 0; i < ChallengeStore.MaxKnownCodesPerUser + 1; i++)
+        {
+            codes.Add(store.Issue(Bind(device: "d" + i), Fp, TimeSpan.FromMinutes(10), 20));
+        }
+
+        Assert.True(store.IsKnownCode(user, codes[^1]));
+        Assert.False(store.IsKnownCode(Guid.NewGuid(), codes[^1]));
+        if (codes.Skip(1).All(c => c != codes[0]))
+        {
+            Assert.False(store.IsKnownCode(user, codes[0])); // oldest dropped
+        }
+
+        _time.Advance(ChallengeStore.KnownCodeLifetime);
+        Assert.False(store.IsKnownCode(user, codes[^1]));
+    }
+
+    [Fact]
+    public void RemoveUser_ForgetsKnownCodesAndGrants()
+    {
+        var store = Store();
+        var code = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), code, Fp, 5));
+        store.GrantReuse(Bind().UserId, code, Fp, 2, TimeSpan.FromMinutes(5));
+        store.RemoveUser(Bind().UserId);
+        Assert.False(store.IsKnownCode(Bind().UserId, code));
+        Assert.False(store.HasReuseGrant(Bind().UserId));
+        Assert.Equal(VerifyResult.NoChallenge, store.VerifyReuse(Bind().UserId, code, Fp, 5));
+    }
+
+    [Fact]
+    public void Reuse_AnyDeviceOfTheUser_LimitedUses()
+    {
+        var store = Store();
+        var user = Bind().UserId;
+        var code = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), code, Fp, 5));
+        Assert.Equal(VerifyResult.NoChallenge, store.VerifyReuse(user, code, Fp, 5)); // no grant yet
+
+        store.GrantReuse(user, code, Fp, 2, TimeSpan.FromMinutes(5));
+        Assert.Equal(VerifyResult.NoChallenge, store.VerifyReuse(Guid.NewGuid(), code, Fp, 5)); // other user
+        Assert.Equal(VerifyResult.Success, store.VerifyReuse(user, code, Fp, 5));
+        Assert.Equal(VerifyResult.Success, store.VerifyReuse(user, code, Fp, 5));
+        Assert.Equal(VerifyResult.NoChallenge, store.VerifyReuse(user, code, Fp, 5)); // used up
+        Assert.True(store.IsKnownCode(user, code));
+    }
+
+    [Fact]
+    public void Reuse_Expires()
+    {
+        var store = Store();
+        var user = Bind().UserId;
+        store.GrantReuse(user, "12345678", Fp, 5, TimeSpan.FromMinutes(5));
+        Assert.True(store.HasReuseGrant(user));
+        _time.Advance(TimeSpan.FromMinutes(5));
+        Assert.False(store.HasReuseGrant(user));
+        Assert.Equal(VerifyResult.NoChallenge, store.VerifyReuse(user, "12345678", Fp, 5));
+    }
+
+    [Fact]
+    public void Reuse_PasswordChange_RevokesGrant()
+    {
+        var store = Store();
+        var user = Bind().UserId;
+        store.GrantReuse(user, "12345678", Fp, 5, TimeSpan.FromMinutes(5));
+        Assert.Equal(VerifyResult.PasswordChanged, store.VerifyReuse(user, "12345678", ChallengeStore.Fingerprint("hash-2"), 5));
+        Assert.Equal(VerifyResult.NoChallenge, store.VerifyReuse(user, "12345678", Fp, 5));
+    }
+
+    [Fact]
+    public void Reuse_WrongCodes_RevokeGrantAfterMaxAttempts()
+    {
+        var store = Store();
+        var user = Bind().UserId;
+        store.GrantReuse(user, "12345678", Fp, 5, TimeSpan.FromMinutes(5));
+        Assert.Equal(VerifyResult.WrongCode, store.VerifyReuse(user, "00000000", Fp, 2));
+        Assert.Equal(VerifyResult.TooManyAttempts, store.VerifyReuse(user, "00000001", Fp, 2));
+        Assert.Equal(VerifyResult.NoChallenge, store.VerifyReuse(user, "12345678", Fp, 2));
+    }
+
+    [Fact]
+    public void Reuse_ZeroUses_NoGrant()
+    {
+        var store = Store();
+        store.GrantReuse(Bind().UserId, "12345678", Fp, 0, TimeSpan.FromMinutes(5));
+        Assert.False(store.HasReuseGrant(Bind().UserId));
     }
 
     [Fact]

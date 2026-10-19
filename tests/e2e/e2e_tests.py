@@ -20,6 +20,20 @@ def check(name, cond, detail=""):
 def login(base, user, pw, dev, headers=None, client="E2E Client"):
     return call("POST", base + "/Users/AuthenticateByName", {"Username": user, "Pw": pw}, device_id=dev, client=client, headers=headers)
 
+def db(q):
+    return subprocess.run(["sqlite3", "-readonly", DB, q], capture_output=True, text=True).stdout.strip()
+
+def failed_count(user="alice"):
+    """Jellyfin's own failed sign-in counter (what lockout, the activity log and fail2ban/CrowdSec see)."""
+    return int(db(f"SELECT InvalidLoginAttemptCount FROM Users WHERE Username='{user}'") or 0)
+
+def denied_lines():
+    """Jellyfin log lines 'Authentication request for ... has been denied' (parsed by CrowdSec's jellyfin-bf)."""
+    try:
+        return open(os.path.join(WORK, "jf", "stdout.log"), errors="replace").read().count("has been denied")
+    except OSError:
+        return -1
+
 def device_ids():
     s, d = call("GET", PROXY + "/Devices", token=T)
     return {x["Id"] for x in d["Items"]}
@@ -58,14 +72,19 @@ s, _ = login(PROXY, "alice", "AlicePass1!", "dev-A", XFF)
 time.sleep(1.5)
 check("proxy: retry within cooldown -> 403, no new email", s == 403 and len(mails()) == n0 + 1)
 
-# --- 3. wrong password / wrong code -> 401
+# --- 3. wrong password -> 401 (a real failed sign-in); correct password + wrong code -> 403 (not counted by Jellyfin)
+f0, d0 = failed_count(), denied_lines()
 check("proxy: wrong password -> 401", login(PROXY, "alice", "nope", "dev-A", XFF)[0] == 401)
+check("proxy: wrong password counted by Jellyfin", failed_count() == f0 + 1, (f0, failed_count()))
 wrong = "00000000" if code != "00000000" else "11111111"
-check("proxy: wrong code -> 401", login(PROXY, "alice", "AlicePass1!" + wrong, "dev-A", XFF)[0] == 401)
+f0, d0 = failed_count(), denied_lines()
+check("proxy: correct password + wrong code -> 403", login(PROXY, "alice", "AlicePass1!" + wrong, "dev-A", XFF)[0] == 403)
 
-# --- 4. code bound to the device that requested it
-check("proxy: code on another device -> 401", login(PROXY, "alice", "AlicePass1!" + code, "dev-B", XFF)[0] == 401)
-check("proxy: code with another client name -> 401", login(PROXY, "alice", "AlicePass1!" + code, "dev-A", XFF, client="Other")[0] == 401)
+# --- 4. code bound to the device that requested it (password correct -> 403, no token)
+check("proxy: code on another device -> 403", login(PROXY, "alice", "AlicePass1!" + code, "dev-B", XFF)[0] == 403)
+check("proxy: code with another client name -> 403", login(PROXY, "alice", "AlicePass1!" + code, "dev-A", XFF, client="Other")[0] == 403)
+check("proxy: 403s after a correct password are not failed sign-ins for Jellyfin", failed_count() == f0 and denied_lines() == d0, (f0, failed_count(), d0, denied_lines()))
+check("proxy: no device created for the refused attempts", "dev-B" not in device_ids())
 
 # --- 5. password + code -> 200, token works
 s, r = login(PROXY, "alice", "AlicePass1!" + code, "dev-A", XFF)
@@ -73,8 +92,10 @@ check("proxy: password+code -> 200 token", s == 200 and r.get("AccessToken"), s)
 alice_token = r.get("AccessToken") if s == 200 else None
 check("proxy: issued token works", call("GET", PROXY + "/Users/Me", token=alice_token, device_id="dev-A", headers=XFF)[0] == 200)
 
-# --- 6. replay -> 401
-check("proxy: code replay -> 401", login(PROXY, "alice", "AlicePass1!" + code, "dev-A", XFF)[0] == 401)
+# --- 6. replay -> 403 (stale code after a correct password), no new token, not counted
+f0 = failed_count()
+check("proxy: code replay -> 403", login(PROXY, "alice", "AlicePass1!" + code, "dev-A", XFF)[0] == 403)
+check("proxy: replay not counted as failed sign-in", failed_count() == f0)
 
 # --- 7. direct LAN -> password only
 s, r = login(LAN, "alice", "AlicePass1!", "dev-lan")
@@ -167,7 +188,8 @@ time.sleep(2); new = [m for m in mails()[n3:] if "sign-in code" in m[2]]
 pc = code_from(new[-1][3]) if new else "x"
 s, _ = call("POST", PROXY + "/Users/Password", {"CurrentPw": "AlicePass1!", "NewPw": "AlicePass2!"}, token=alice_token, device_id="dev-A", headers=XFF)
 check("password change (authenticated, password only) -> 204", s == 204, s)
-check("pending code invalid after password change", login(PROXY, "alice", "AlicePass2!" + pc, "dev-pc", XFF)[0] == 401)
+check("pending code invalid after password change (403, no token)", login(PROXY, "alice", "AlicePass2!" + pc, "dev-pc", XFF)[0] == 403)
+check("old password + pending code after password change -> 401", login(PROXY, "alice", "AlicePass1!" + pc, "dev-pc", XFF)[0] == 401)
 check("own session survives own password change", call("GET", PROXY + "/Users/Me", token=alice_token, device_id="dev-A", headers=XFF)[0] == 200)
 check("other sessions revoked by password change (QC token)", call("GET", PROXY + "/Users/Me", token=qc_token, device_id="tv-1", client="E2E TV", headers=XFF)[0] == 401)
 
@@ -188,8 +210,6 @@ check("same user, direct LAN -> 200 (not blocked by remote failures)", login(LAN
 plugin_cfg(MaxFailuresPerUser=30)
 
 # --- 19. unenroll after failures: Jellyfin's default lockout returns, but old failures must not disable the account
-def db(q):
-    return subprocess.run(["sqlite3", "-readonly", DB, q], capture_output=True, text=True).stdout.strip()
 for i in range(4):  # the provider rejects; Jellyfin counts these failures even while its lockout is off
     login(LAN, "alice", "bad-%d" % i, "dev-cnt")
 before = int(db(f"SELECT InvalidLoginAttemptCount FROM Users WHERE Username='alice'") or 0)
@@ -222,7 +242,44 @@ s, c2, _ = fresh_code("203.0.113.63", "dev-co2")
 check("code-only: password + code still works -> 200", c2 and login(PROXY, "alice", "AlicePass2!" + c2, "dev-co2", {"X-Forwarded-For": "203.0.113.63"})[0] == 200)
 plugin_cfg(AllowCodeOnlySecondStep=False)
 s, c3, _ = fresh_code("203.0.113.64", "dev-co3")
-check("code-only off: code alone -> 401", c3 and login(PROXY, "alice", c3, "dev-co3", {"X-Forwarded-For": "203.0.113.64"})[0] == 401)
+check("code-only off: known code alone -> 403 (never accepted)", c3 and login(PROXY, "alice", c3, "dev-co3", {"X-Forwarded-For": "203.0.113.64"})[0] == 403)
+unknown = "12345678" if c3 != "12345678" else "87654321"
+check("code-only off: unknown code alone -> 401", login(PROXY, "alice", unknown, "dev-co3", {"X-Forwarded-For": "203.0.113.64"})[0] == 401)
+check("code-only off: code still pending (password + code -> 200)", login(PROXY, "alice", "AlicePass2!" + c3, "dev-co3", {"X-Forwarded-For": "203.0.113.64"})[0] == 200)
+
+# --- 22. code reuse: Neptune signs in with the code alone, then passes the same credentials to Seerr
+plugin_cfg(AllowCodeOnlySecondStep=True, CodeReuseCount=2, CodeReuseMinutes=5, CodeReuseClients="Seerr,Jellyseerr", CodeReuseAddresses="")
+def neptune_code(ip, dev="neptune-1"):
+    n = len(mails())
+    login(PROXY, "alice", "AlicePass2!", dev, {"X-Forwarded-For": ip}, client="Neptune")
+    new = [m for m in wait_mail(n) if "sign-in code" in m[2] and ip in m[3]]
+    return (code_from(new[-1][3]) if new else None), (new[-1] if new else None)
+SEERR_DEV = "Qk9UX3NlZXJyX2FsaWNl"  # base64("BOT_seerr_alice"), what Seerr sends
+nc, nm = neptune_code("203.0.113.70")
+check("reuse: email mentions reuse by Seerr", nm and "Seerr" in nm[3] and "2 more time(s)" in nm[3])
+check("reuse: Neptune code alone -> 200", nc and login(PROXY, "alice", nc, "neptune-1", {"X-Forwarded-For": "203.0.113.70"}, client="Neptune")[0] == 200)
+f0, d0 = failed_count(), denied_lines()
+check("reuse: unlisted app -> 403 (stale, not accepted)", login(PROXY, "alice", nc, "other-dev", {"X-Forwarded-For": "203.0.113.71"}, client="Overseerr")[0] == 403)
+check("reuse: Seerr via proxy (own device, own IP) -> 200", login(PROXY, "alice", nc, SEERR_DEV, {"X-Forwarded-For": "203.0.113.71"}, client="Seerr")[0] == 200)
+check("reuse: Seerr direct from LAN without X-Forwarded-For -> 200", login(LAN, "alice", nc, SEERR_DEV, client="Seerr")[0] == 200)
+check("reuse: used up -> 403", login(PROXY, "alice", nc, SEERR_DEV, {"X-Forwarded-For": "203.0.113.71"}, client="Seerr")[0] == 403)
+check("reuse: Neptune re-auth with the stored code -> 403", login(PROXY, "alice", nc, "neptune-1", {"X-Forwarded-For": "203.0.113.70"}, client="Neptune")[0] == 403)
+check("reuse: none of this counted as failed sign-in by Jellyfin", failed_count() == f0 and denied_lines() == d0, (f0, failed_count(), d0, denied_lines()))
+plugin_cfg(CodeReuseAddresses="10.255.255.5")
+time.sleep(1.5)
+nc2, _ = neptune_code("203.0.113.72", "neptune-2")
+check("reuse+addresses: Neptune -> 200", nc2 and login(PROXY, "alice", nc2, "neptune-2", {"X-Forwarded-For": "203.0.113.72"}, client="Neptune")[0] == 200)
+check("reuse+addresses: Seerr from a non-listed peer -> 403", login(PROXY, "alice", nc2, SEERR_DEV, {"X-Forwarded-For": "10.255.255.5"}, client="Seerr")[0] == 403)
+plugin_cfg(AllowCodeOnlySecondStep=False, CodeReuseCount=0, CodeReuseAddresses="")
+
+# --- 23. email time zone
+plugin_cfg(EmailTimeZone="Europe/Berlin")
+time.sleep(1.5)
+n = len(mails())
+login(PROXY, "alice", "AlicePass2!", "dev-tz", {"X-Forwarded-For": "203.0.113.80"})
+new = [m for m in wait_mail(n) if "sign-in code" in m[2]]
+check("time zone: code email shows Europe/Berlin", new and re.search(r"Europe/Berlin \(UTC\+0[12]:00\)", new[-1][3]), new[-1][3][-400:] if new else "no mail")
+plugin_cfg(EmailTimeZone="")
 
 # --- 21. config robustness: a posted config with Users=null must not break sign-in or status
 s, c = call("GET", f"{PROXY}/Plugins/{PID}/Configuration", token=T)
