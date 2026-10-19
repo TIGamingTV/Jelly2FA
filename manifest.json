@@ -3,6 +3,14 @@
     "guid": "aeb8e07d-2227-4d18-ad2f-7f49c81db71b",
     "versions": [
       {
+        "version": "0.0.5.0",
+        "changelog": "0.0.5.0: A correct password with a wrong, used or expired code, and recently issued codes entered again, are answered with 403 instead of 401, so Jellyfin and fail2ban/CrowdSec no longer count them as failed sign-ins; clearer log messages. Times in emails use the server's time zone (optional override). Optional code reuse for apps such as Seerr that sign in with the credentials another app (Neptune) just used. On direct LAN/Tailscale connections, password + code is accepted like the password alone. 0.0.4.0: New plugin image. 0.0.3.0: Adds the plugin image. 0.0.2.0: Disabling the plugin returns sign-in to normal (users are handed back immediately and switched back to 2FA, with their sessions revoked, when it is enabled again); uninstall restores Jellyfin's default lockout, resets failed-login counters and deletes the SMTP password file. Failures through the proxy can no longer block LAN/Tailscale sign-in; the failure throttle is race-free and groups IPv6 by /64. Fixes in the recovery script (user names with quotes, exit codes), dropped code emails, health checks and configuration handling.",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/TIGamingTV/Jelly2FA/releases/download/v0.0.5.0/jelly2fa_0.0.5.0.zip",
+        "checksum": "bc2f550ec44aa83232fe61dd9a93a815",
+        "timestamp": "2026-10-19T07:23:00Z"
+      },
+      {
         "version": "0.0.4.0",
         "changelog": "0.0.4.0: New plugin image. 0.0.3.0: Adds the plugin image. 0.0.2.0: Disabling the plugin returns sign-in to normal (users are handed back immediately and switched back to 2FA, with their sessions revoked, when it is enabled again); uninstall restores Jellyfin's default lockout, resets failed-login counters and deletes the SMTP password file. Failures through the proxy can no longer block LAN/Tailscale sign-in; the failure throttle is race-free and groups IPv6 by /64. Fixes in the recovery script (user names with quotes, exit codes), dropped code emails, health checks and configuration handling.",
         "targetAbi": "12.0.0.0",
