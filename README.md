@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Jelly2FA.png" alt="Jelly2FA" width="400">
+</p>
+
 # Jelly2FA
 
 > **Unofficial, personal project (version 0.0.5.0).** Not affiliated with Jellyfin. Not audited. Use at your own risk and keep a recovery path (see below).
