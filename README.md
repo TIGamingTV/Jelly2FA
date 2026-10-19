@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Jelly2FA.png" alt="Jelly2FA" width="400">
+  <img src="Jelly2FA.PNG" alt="Jelly2FA" width="400">
 </p>
 
 # Jelly2FA
