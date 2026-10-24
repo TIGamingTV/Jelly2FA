@@ -28,6 +28,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<HealthState>();
         serviceCollection.AddSingleton<ChallengeStore>();
         serviceCollection.AddSingleton<RateLimiter>();
+        serviceCollection.AddSingleton<ThrottleService>();
         serviceCollection.AddSingleton<LoginApprovalRegistry>();
         serviceCollection.AddSingleton<SecretStore>();
         serviceCollection.AddSingleton<IOriginClassifier, OriginClassifier>();

@@ -20,6 +20,10 @@
             <p class="fieldDescription">Enrolling revokes all existing sessions of that user. Enroll yourself while connected over LAN/Tailscale.</p>
             <div id="j2faUsers">Loading...</div>
 
+            <h3>Failed sign-in throttles</h3>
+            <p class="fieldDescription">Jelly2FA's own counters of failed sign-ins per client IP and per user (kept in memory, lost on restart). Clearing a counter ends its block at once. Bans made by CrowdSec are not shown here: use cscli decisions list / cscli decisions delete --ip ADDRESS.</p>
+            <div id="j2faThrottles">Loading...</div>
+
             <form id="j2faForm">
                 <h3>Email (SMTP, STARTTLS required)</h3>
                 <div class="inputContainer"><label class="inputLabel" for="SmtpHost">SMTP host</label><input id="SmtpHost" type="text" is="emby-input" /></div>
@@ -64,6 +68,10 @@
                 <div class="inputContainer"><label class="inputLabel" for="MaxFailuresPerUser">Failed sign-ins per user</label><input id="MaxFailuresPerUser" type="number" min="1" is="emby-input" /></div>
                 <div class="inputContainer"><label class="inputLabel" for="UserWindowMinutes">User window (minutes)</label><input id="UserWindowMinutes" type="number" min="1" is="emby-input" /></div>
 
+                <h3>CrowdSec</h3>
+                <div class="checkboxContainer"><label class="emby-checkbox-label"><input id="DelegateIpBansToCrowdSec" type="checkbox" is="emby-checkbox" /><span>Let CrowdSec make the IP bans</span></label><div class="fieldDescription">For CrowdSec reading Jellyfin's log (collection crowdsecurity/jellyfin). Wrong codes after a correct password are then also logged as "Authentication request for ... has been denied (IP: ...)", so CrowdSec counts them like wrong passwords; list and lift bans with cscli. "Failed sign-ins per IP" is ignored, only the backstop below applies. The per-user limit stays (clear it under Failed sign-in throttles). Requires Jellyfin "Known proxies", otherwise CrowdSec would ban the proxy.</div></div>
+                <div class="inputContainer"><label class="inputLabel" for="CrowdSecIpBackstop">Backstop: failed sign-ins per IP that Jelly2FA still blocks</label><input id="CrowdSecIpBackstop" type="number" min="1" is="emby-input" /><div class="fieldDescription">Within the IP window above. Safety net if CrowdSec is not running; keep it well above CrowdSec's threshold (default 100).</div></div>
+
                 <button is="emby-button" type="submit" class="raised button-submit block emby-button"><span>Save settings</span></button>
             </form>
 
@@ -82,8 +90,8 @@
             var pluginId = 'aeb8e07d-2227-4d18-ad2f-7f49c81db71b';
             var page = document.querySelector('#Jelly2FAConfigPage');
             var textFields = ['SmtpHost', 'SmtpUsername', 'FromAddress', 'FromName', 'AdminAlertEmail', 'ServerDisplayName', 'EmailTimeZone', 'ProxyAddresses', 'TrustedDirectNetworks', 'CodeReuseClients', 'CodeReuseAddresses'];
-            var numberFields = ['SmtpPort', 'CodeLifetimeMinutes', 'MaxCodeAttempts', 'MaxPendingPerUser', 'ResendCooldownSeconds', 'MaxEmailsPerUserPerHour', 'MaxEmailsPerHourGlobal', 'MaxFailuresPerIp', 'IpWindowMinutes', 'MaxFailuresPerUser', 'UserWindowMinutes', 'CodeReuseCount', 'CodeReuseMinutes'];
-            var boolFields = ['TrustJellyfinLocalNetworks', 'TrustLoopback', 'AllowQuickConnect', 'NotifyOnQuickConnect', 'AllowCodeOnlySecondStep'];
+            var numberFields = ['SmtpPort', 'CodeLifetimeMinutes', 'MaxCodeAttempts', 'MaxPendingPerUser', 'ResendCooldownSeconds', 'MaxEmailsPerUserPerHour', 'MaxEmailsPerHourGlobal', 'MaxFailuresPerIp', 'IpWindowMinutes', 'MaxFailuresPerUser', 'UserWindowMinutes', 'CodeReuseCount', 'CodeReuseMinutes', 'CrowdSecIpBackstop'];
+            var boolFields = ['TrustJellyfinLocalNetworks', 'TrustLoopback', 'AllowQuickConnect', 'NotifyOnQuickConnect', 'AllowCodeOnlySecondStep', 'DelegateIpBansToCrowdSec'];
 
             function esc(s) {
                 return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -115,7 +123,7 @@
                 ApiClient.getJSON(ApiClient.getUrl('Jelly2FA/Status')).then(function (s) {
                     var html = '<p><b>' + (s.Healthy ? 'Healthy' : 'PROBLEMS FOUND') + '</b> - enrolled users: ' + esc(s.EnrolledUsers) +
                         ', proxy known: ' + (s.ProxyConfigured ? 'yes' : 'NO') + ', SMTP: ' + (s.SmtpConfigured ? 'configured' : 'NOT configured') +
-                        ', Quick Connect: ' + (s.QuickConnectEnabled ? 'on' : 'off') + '</p>';
+                        ', Quick Connect: ' + (s.QuickConnectEnabled ? 'on' : 'off') + ', IP bans: ' + esc(s.IpBans) + '</p>';
                     if (s.Problems.length) {
                         html += '<ul style="color:#e57373">' + s.Problems.map(function (p) { return '<li>' + esc(p) + '</li>'; }).join('') + '</ul>';
                     }
@@ -143,7 +151,37 @@
                 }, fail);
             }
 
-            function refresh() { loadStatus(); loadUsers(); }
+            function time(iso) {
+                var d = new Date(iso);
+                return isNaN(d.getTime()) ? '' : d.toLocaleTimeString();
+            }
+
+            function loadThrottles() {
+                ApiClient.getJSON(ApiClient.getUrl('Jelly2FA/Throttles')).then(function (entries) {
+                    if (!entries.length) {
+                        page.querySelector('#j2faThrottles').innerHTML = '<p>No recent failed sign-ins.</p>';
+                        return;
+                    }
+                    var rows = entries.map(function (t) {
+                        var state = t.Blocked ? 'BLOCKED until ' + time(t.BlockedUntil) : 'counting (resets ' + time(t.ExpiresAt) + ')';
+                        return '<tr data-key="' + esc(t.Key) + '">' +
+                            '<td>' + (t.Kind === 'ip' ? 'IP' : 'User') + '</td>' +
+                            '<td>' + esc(t.Subject) + '</td>' +
+                            '<td>' + esc(t.Failures) + ' / ' + esc(t.Limit) + '</td>' +
+                            '<td>' + esc(state) + '</td>' +
+                            '<td><button is="emby-button" type="button" class="emby-button j2faClearThrottle">Clear</button></td></tr>';
+                    }).join('');
+                    page.querySelector('#j2faThrottles').innerHTML = '<table class="detailTable"><thead><tr><th>Type</th><th>IP / user</th><th>Failures / limit</th><th>State</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+                }, fail);
+            }
+
+            function refresh() { loadStatus(); loadUsers(); loadThrottles(); }
+
+            page.querySelector('#j2faThrottles').addEventListener('click', function (e) {
+                var btn = e.target.closest('button.j2faClearThrottle');
+                if (!btn) { return; }
+                post('Jelly2FA/Throttles/Clear', { Key: btn.closest('tr').getAttribute('data-key') }).then(loadThrottles, fail);
+            });
 
             page.querySelector('#j2faUsers').addEventListener('click', function (e) {
                 var btn = e.target.closest('button');

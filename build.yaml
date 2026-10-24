@@ -1,7 +1,7 @@
 ---
 name: "Jelly2FA"
 guid: "aeb8e07d-2227-4d18-ad2f-7f49c81db71b"
-version: "0.0.6.0"
+version: "0.0.7.0"
 targetAbi: "12.0.0.0"
 framework: "net10.0"
 overview: "Email-code two-factor authentication for remote sign-ins"
@@ -14,6 +14,7 @@ owner: "TIGamingTV"
 artifacts:
   - "Jellyfin.Plugin.Jelly2FA.dll"
 changelog: >
+  0.0.7.0: Optional "Let CrowdSec make the IP bans": Jelly2FA then only keeps a high per-IP backstop (default 100 failures per IP window) and logs wrong codes after a correct password, and IPs blocked by the backstop, as "Authentication request for ... has been denied (IP: ...)", the line CrowdSec's Jellyfin parser reads, so bans can be listed and lifted with cscli. The per-user limit stays and is not reported. New "Failed sign-in throttles" section on the plugin page lists the per-IP and per-user counters and clears them. The status page shows who makes the IP bans and reports CrowdSec mode without Known proxies as a problem.
   0.0.6.0: Signing in with the password again no longer cancels the code from the previous email: the codes from the last 3 emails for the same device and app stay valid until they expire (using one ends the others). Code emails name the app in the subject, say that earlier codes keep working, and in code-only mode mention that password + code works too (easier on TVs, e.g. Android TV, where the password stays in the field). If a code email cannot be queued, only that code is dropped.
   0.0.5.0: A correct password with a wrong, used or expired code, and recently issued codes entered again, are answered with 403 instead of 401, so Jellyfin and fail2ban/CrowdSec no longer count them as failed sign-ins; clearer log messages. Times in emails use the server's time zone (optional override). Optional code reuse for apps such as Seerr that sign in with the credentials another app (Neptune) just used. On direct LAN/Tailscale connections, password + code is accepted like the password alone.
   0.0.4.0: New plugin image. 0.0.3.0: Adds the plugin image.

@@ -109,6 +109,23 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the user failure window.</summary>
     public int UserWindowMinutes { get; set; } = 15;
 
+    // ---- CrowdSec ----
+
+    /// <summary>
+    /// Gets or sets a value indicating whether CrowdSec makes the per-IP bans (off by default). When on, the
+    /// per-IP limit is <see cref="CrowdSecIpBackstop"/> instead of <see cref="MaxFailuresPerIp"/>, and failures that
+    /// Jellyfin does not log itself (wrong code after a correct password, IPs blocked by the backstop) are logged
+    /// as "Authentication request for ... has been denied (IP: ...)", the line CrowdSec's Jellyfin parser reads.
+    /// The per-user limit stays.
+    /// </summary>
+    public bool DelegateIpBansToCrowdSec { get; set; }
+
+    /// <summary>
+    /// Gets or sets the failed sign-ins per client IP within <see cref="IpWindowMinutes"/> that Jelly2FA still
+    /// blocks itself when <see cref="DelegateIpBansToCrowdSec"/> is on (safety net if CrowdSec is not running).
+    /// </summary>
+    public int CrowdSecIpBackstop { get; set; } = 100;
+
     // ---- Code reuse (apps that sign in with the credentials of another app, e.g. Seerr via Neptune) ----
 
     /// <summary>

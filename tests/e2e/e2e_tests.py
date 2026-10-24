@@ -281,6 +281,50 @@ new = [m for m in wait_mail(n) if "sign-in code" in m[2]]
 check("time zone: code email shows Europe/Berlin", new and re.search(r"Europe/Berlin \(UTC\+0[12]:00\)", new[-1][3]), new[-1][3][-400:] if new else "no mail")
 plugin_cfg(EmailTimeZone="")
 
+# --- 24. CrowdSec makes the IP bans: wrong codes logged like Jellyfin's "has been denied", backstop instead of the IP limit
+def stdout_log():
+    return open(os.path.join(WORK, "jf", "stdout.log"), errors="replace").read()
+def throttles():
+    return call("GET", PROXY + "/Jelly2FA/Throttles", token=T)[1]
+plugin_cfg(DelegateIpBansToCrowdSec=True, CrowdSecIpBackstop=15, MaxFailuresPerUser=1000)
+time.sleep(1.5)
+s, st = call("GET", PROXY + "/Jelly2FA/Status", token=T)
+check("crowdsec: status says CrowdSec makes the IP bans", s == 200 and st["IpBansByCrowdSec"] and "backstop: 15" in st["IpBans"], st.get("IpBans"))
+CS = {"X-Forwarded-For": "203.0.113.90"}
+n = len(mails())
+login(PROXY, "alice", "AlicePass2!", "dev-cs", CS)
+new = [m for m in wait_mail(n) if "sign-in code" in m[2] and "203.0.113.90" in m[3]]
+csc = code_from(new[-1][3]) if new else None
+wrong = "00000000" if csc != "00000000" else "11111111"
+f0, d0 = failed_count(), denied_lines()
+check("crowdsec: correct password + wrong code -> still 403", login(PROXY, "alice", "AlicePass2!" + wrong, "dev-cs", CS)[0] == 403)
+time.sleep(1)
+check("crowdsec: wrong code -> one denied line, not a Jellyfin failed sign-in", denied_lines() == d0 + 1 and failed_count() == f0, (d0, denied_lines(), f0, failed_count()))
+check("crowdsec: line matches the hub parser (user, client IP)",
+      re.search(r'Authentication request for "?alice"? has been denied \(IP: "?203\.0\.113\.90"?\)', stdout_log()))
+ip_rows = [t for t in throttles() if t["Kind"] == "ip" and t["Subject"] == "203.0.113.90"]
+check("throttles: the IP is listed with 1 failure, not blocked", len(ip_rows) == 1 and ip_rows[0]["Failures"] == 1 and not ip_rows[0]["Blocked"], ip_rows)
+check("throttles: clear -> 204", ip_rows and call("POST", PROXY + "/Jelly2FA/Throttles/Clear", {"Key": ip_rows[0]["Key"]}, token=T)[0] == 204)
+check("throttles: cleared IP no longer listed", not [t for t in throttles() if t["Subject"] == "203.0.113.90"])
+check("throttles: other keys cannot be cleared -> 400", call("POST", PROXY + "/Jelly2FA/Throttles/Clear", {"Key": "mail:global"}, token=T)[0] == 400)
+check("throttles: list requires an administrator", call("GET", PROXY + "/Jelly2FA/Throttles", token=alice_token, device_id="dev-A", headers=XFF)[0] in (401, 403))
+BS = {"X-Forwarded-For": "198.51.100.30"}
+statuses = [login(PROXY, "alice", "wrong-cs-%d" % i, "dev-bs", BS)[0] for i in range(15)]
+check("crowdsec: 15 wrong passwords from one IP -> all 401 (Jelly2FA's IP limit of 10 not applied)", statuses == [401] * 15, statuses)
+d0 = denied_lines()
+check("crowdsec: backstop reached -> 403", login(PROXY, "alice", "AlicePass2!", "dev-bs", BS)[0] == 403)
+time.sleep(1)
+check("crowdsec: backstop block logged as denied for that IP", denied_lines() == d0 + 1
+      and re.search(r'has been denied \(IP: "?198\.51\.100\.30"?\)\. Reason: IP over the Jelly2FA backstop', stdout_log()))
+blocked = [t for t in throttles() if t["Subject"] == "198.51.100.30"]
+check("throttles: backstop IP listed as blocked", blocked and blocked[0]["Blocked"] and blocked[0]["Limit"] == 15, blocked)
+for t in throttles():
+    call("POST", PROXY + "/Jelly2FA/Throttles/Clear", {"Key": t["Key"]}, token=T)
+n = len(mails())
+login(PROXY, "alice", "AlicePass2!", "dev-bs", BS)
+check("throttles: after clearing, that IP gets a code again", [m for m in wait_mail(n) if "sign-in code" in m[2] and "198.51.100.30" in m[3]] and not throttles())
+plugin_cfg(DelegateIpBansToCrowdSec=False, MaxFailuresPerUser=30)
+
 # --- 21. config robustness: a posted config with Users=null must not break sign-in or status
 s, c = call("GET", f"{PROXY}/Plugins/{PID}/Configuration", token=T)
 saved_users = c["Users"]

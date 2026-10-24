@@ -32,7 +32,7 @@ On systems without ICU, run `dotnet` with `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT
 
 The end-to-end suite runs against a real Jellyfin 12.2 server, with `127.0.0.1` playing nginx and a local STARTTLS SMTP sink. It needs the extracted Jellyfin 12.2 tarball, the .NET SDK, python3, sqlite3, openssl and curl; the script header documents its environment variables (`J2FA_E2E_DIR`, `J2FA_E2E_LAN_URL`, `J2FA_E2E_LAN_NET`, `J2FA_E2E_BIND`). **Never run it against a production server.**
 
-It covers, among others: no token or device on 403; the code flow; code replay, device binding and races; LAN, Tailscale-style and untrusted direct connections; spoofed forwarding headers; admins via the proxy; the legacy and lowercase routes; API keys; Quick Connect (allowed, notified, disabled); fail closed without a proxy; password change; throttling without account lockout; the code-only option; 403 instead of 401 after a correct password; code reuse; the email time zone; Disable/Enable/Uninstall/reinstall; the plugin failing to load; and `tools/jelly2fa-recover.sh`.
+It covers, among others: no token or device on 403; the code flow; code replay, device binding and races; LAN, Tailscale-style and untrusted direct connections; spoofed forwarding headers; admins via the proxy; the legacy and lowercase routes; API keys; Quick Connect (allowed, notified, disabled); fail closed without a proxy; password change; throttling without account lockout; the code-only option; 403 instead of 401 after a correct password; code reuse; the email time zone; CrowdSec mode (denied lines, backstop) and clearing throttles; Disable/Enable/Uninstall/reinstall; the plugin failing to load; and `tools/jelly2fa-recover.sh`.
 
 ## Releasing
 
@@ -40,7 +40,7 @@ It covers, among others: no token or device on 403; the code flow; code replay, 
 2. Commit, then tag and push, for example:
 
    ```sh
-   git tag v0.0.6.0 && git push origin v0.0.6.0
+   git tag v0.0.7.0 && git push origin v0.0.7.0
    ```
 
 The `release` workflow (`.github/workflows/release.yml`) runs the tests, builds `jelly2fa_<version>.zip`, attaches it to a GitHub release, and adds the version (with its MD5 checksum) to `manifest.json` on `main`. Jellyfin reads that file as the plugin repository. If `main` is branch-protected, allow `github-actions[bot]` to push to it. The workflow can also re-release an existing tag via *workflow_dispatch*.

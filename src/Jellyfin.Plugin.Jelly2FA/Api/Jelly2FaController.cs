@@ -32,6 +32,7 @@ public class Jelly2FaController : ControllerBase
     private readonly IConfigProvider _config;
     private readonly SecretStore _secrets;
     private readonly EmailQueue _email;
+    private readonly ThrottleService _throttles;
     private readonly ILogger<Jelly2FaController> _logger;
 
     /// <summary>
@@ -43,8 +44,9 @@ public class Jelly2FaController : ControllerBase
     /// <param name="config">Config.</param>
     /// <param name="secrets">Secrets.</param>
     /// <param name="email">Email queue.</param>
+    /// <param name="throttles">Failed sign-in throttles.</param>
     /// <param name="logger">Logger.</param>
-    public Jelly2FaController(EnrollmentService enrollment, HealthService health, IUserManager userManager, IConfigProvider config, SecretStore secrets, EmailQueue email, ILogger<Jelly2FaController> logger)
+    public Jelly2FaController(EnrollmentService enrollment, HealthService health, IUserManager userManager, IConfigProvider config, SecretStore secrets, EmailQueue email, ThrottleService throttles, ILogger<Jelly2FaController> logger)
     {
         _enrollment = enrollment;
         _health = health;
@@ -52,6 +54,7 @@ public class Jelly2FaController : ControllerBase
         _config = config;
         _secrets = secrets;
         _email = email;
+        _throttles = throttles;
         _logger = logger;
     }
 
@@ -183,6 +186,22 @@ public class Jelly2FaController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Lists the failed sign-in counters (per client IP and per user) with their block state.</summary>
+    /// <returns>The counters.</returns>
+    [HttpGet("Throttles")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    public ActionResult<IEnumerable<ThrottleEntryDto>> GetThrottles() => Ok(_throttles.List());
+
+    /// <summary>Clears a failed sign-in counter (ends its block). Does not touch CrowdSec decisions.</summary>
+    /// <param name="request">Key from the list.</param>
+    /// <returns>No content.</returns>
+    [HttpPost("Throttles/Clear")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    public ActionResult ClearThrottle([FromBody, Required] ThrottleKeyRequest request)
+    {
+        return _throttles.Clear(request.Key) ? NoContent() : BadRequest("Not a failed sign-in counter.");
+    }
+
     /// <summary>Sends a test email synchronously.</summary>
     /// <param name="request">Recipient.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -240,6 +259,13 @@ public sealed class EmailRequest
 {
     /// <summary>Gets or sets the email address.</summary>
     public string? Email { get; set; }
+}
+
+/// <summary>Throttle clear request.</summary>
+public sealed class ThrottleKeyRequest
+{
+    /// <summary>Gets or sets the counter key.</summary>
+    public string? Key { get; set; }
 }
 
 /// <summary>SMTP password request.</summary>
