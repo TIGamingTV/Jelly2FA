@@ -599,11 +599,11 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
             clientIp == IpUtil.Unknown ? null : clientIp);
         if (!_notifications.SendCode(email, user.Username, code, auth.Device, auth.Client, clientIp, lifetime))
         {
-            // Not queued: drop the code so the resend cooldown does not block the next attempt, and give the budget back.
-            _challenges.Remove(binding);
+            // Not queued: drop this code (earlier ones stay valid) and give the budget back.
+            _challenges.Remove(binding, code);
             _limiter.Refund(userMailKey, userMailAt);
             _limiter.Refund(GlobalMailKey, globalMailAt);
-            _logger.LogWarning("Jelly2FA: sign-in code email for user {UserId} could not be queued; no code is pending", user.Id);
+            _logger.LogWarning("Jelly2FA: sign-in code email for user {UserId} could not be queued; the code was dropped", user.Id);
             return IssueOutcome.Unavailable;
         }
 

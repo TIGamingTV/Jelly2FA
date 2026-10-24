@@ -65,7 +65,7 @@ Do these steps **while connected over the LAN or Tailscale**, not through the pr
 3. Sign in again **in the same app** with the password immediately followed by the 8-digit code, no space: `MyPassword12345678`.
 4. You are signed in. The session behaves like any other Jellyfin session.
 
-The code is valid for 10 minutes (default), works once, and only for the same user, device and app.
+The code is valid for 10 minutes (default), works once, and only for the same user, device and app. If the user signs in with the password only again, a new code is sent, and the codes from the last 3 emails keep working.
 
 ## Usage
 

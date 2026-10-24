@@ -40,9 +40,10 @@ The code:
 - is random, valid for 10 minutes and allows 5 wrong entries (both configurable);
 - works once (unless [code reuse](#code-reuse-seerr-neptune) is on);
 - works only for the user, device id and app that requested it, and only while the password is unchanged;
+- stays valid when the user signs in with the password again: after the resend cooldown that sends a new code, but the codes from the last 3 emails for the same device and app all keep working until they expire. Using one of them signs the user in and ends the others;
 - is stored only as an HMAC in memory. Restarting Jellyfin discards pending codes.
 
-The code email has a plain-text part and an HTML part that shows the code in large type. It names the device, app, IP and time of the sign-in and warns that someone entered the correct password. Changing the password, the email address or unenrolling discards pending codes.
+The code email has a plain-text part and an HTML part that shows the code in large type. Its subject names the app that requested it (for example *"MyServer: sign-in code for Jellyfin Android TV"*). It names the device, app, IP and time of the sign-in and warns that someone entered the correct password. Changing the password, the email address or unenrolling discards pending codes.
 
 ### 401 or 403
 
@@ -52,7 +53,7 @@ The code email has a plain-text part and an HTML part that shows the code in lar
 | Code alone that was not recently issued to this user | 401 | Yes |
 | Correct password, code sent (or still pending during the resend cooldown) | 403 | No |
 | Correct password + wrong code | 403 | No (but counts for Jelly2FA's own limits) |
-| Correct password + used, expired or replaced code, or a code issued to another device | 403 | No |
+| Correct password + used or expired code, a code from an older email beyond the last 3, or a code issued to another device or app | 403 | No |
 | Correct password, but no code pending for this device and app | 403 | No |
 | Too many failed sign-ins (Jelly2FA throttle) | 403 | No |
 
@@ -72,7 +73,7 @@ Apps don't know about 2FA. After the first (password-only) attempt they show the
 | Client | Message after the first attempt |
 |---|---|
 | Web, Jellyfin Desktop, Android app, Samsung/LG TV | "You are not authorized to access the server at this time…" |
-| Android TV / Google TV | "Unable to connect to server" (misleading; retry with password + code) |
+| Android TV / Google TV (app name *Jellyfin Android TV*) | "Unable to connect to server" (misleading). The password stays in the field: add the code at the end and sign in again. |
 | Swiftfin | an HTTP 403 error |
 | Neptune | "Could not connect to server" (misleading) |
 | Findroid / Streamyfin / Finamp / Kodi / Roku | an error / "login failed" message |
@@ -82,6 +83,8 @@ This table was derived from the clients' source code, not by testing on devices.
 Tips:
 
 - Don't put a space between the password and the code (Swiftfin trims spaces).
+- Password + code always works, also when *Allow the code alone as the second step* is on. On TVs this is the easiest way: the password is still in the field after the first attempt, so just add the code. Pressing *Sign in* again without the code only sends another code email.
+- A code works only in the app that requested it: a code requested on the TV cannot be used in the phone app, and the other way round.
 - Roku's on-screen keyboard may limit the length of the password field (unverified).
 - Infuse (closed source) is untested.
 - **Jellyseerr / Seerr:** sign in with **Quick Connect** (Seerr 3.4+). Seerr's library sync uses an API key and is unaffected. For apps that sign in to Seerr with your Jellyfin credentials, see [Code reuse](#code-reuse-seerr-neptune).
@@ -153,5 +156,5 @@ All limits are configurable, see [Limits](configuration.md#limits). Defaults:
 - Failed sign-ins are throttled per IP (10 per 5 minutes; IPv6 per /64) and, for sign-ins through the proxy, per user (10 per 15 minutes). Throttled attempts get 403.
 - Counted as failures: wrong passwords, unknown codes, and wrong codes after a correct password. **Not** counted: a stale (recently issued) code, or a correct password without a pending code.
 - Direct LAN/Tailscale sign-ins are throttled per IP only, so failures from the internet cannot lock a user out of the LAN.
-- If a code email cannot be queued, no code is kept, so the next attempt sends a new one instead of waiting for the cooldown.
+- If a code email cannot be queued, that code is dropped (earlier codes stay valid).
 - Jellyfin's own lockout is switched off for enrolled users: a lockout disables the account (which also kills existing sessions), and anyone who knows a user name could trigger it.

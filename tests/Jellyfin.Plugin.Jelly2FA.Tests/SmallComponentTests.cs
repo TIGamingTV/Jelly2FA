@@ -132,7 +132,10 @@ public class NotificationTemplateTests
     public void English_IsDefault_AndHtmlHighlightsCode()
     {
         var m = Code(null);
-        Assert.Equal("MyServer: sign-in code", m.Subject);
+        Assert.Equal("MyServer: sign-in code for App", m.Subject);
+        Assert.Contains("only in the app and on the device that requested it (App)", m.Body, StringComparison.Ordinal);
+        Assert.Contains("Codes from earlier emails for the same app keep working", m.Body, StringComparison.Ordinal);
+        Assert.Contains("Codes from earlier emails for the same app keep working", m.HtmlBody, StringComparison.Ordinal);
         Assert.Contains("Hello alice,", m.Body, StringComparison.Ordinal);
         Assert.Contains("12345678", m.Body, StringComparison.Ordinal);
         Assert.Contains("MyPassword12345678", m.Body, StringComparison.Ordinal);
@@ -146,7 +149,7 @@ public class NotificationTemplateTests
     public void German_Texts()
     {
         var m = Code("de");
-        Assert.Equal("MyServer: Anmeldecode", m.Subject);
+        Assert.Equal("MyServer: Anmeldecode für App", m.Subject);
         Assert.Contains("Hallo alice,", m.Body, StringComparison.Ordinal);
         Assert.Contains("MeinPasswort12345678", m.Body, StringComparison.Ordinal);
         Assert.Contains("Gerät:", m.Body, StringComparison.Ordinal);
@@ -159,6 +162,27 @@ public class NotificationTemplateTests
         Assert.DoesNotContain("MyPassword", Code("en", codeOnly: true).Body, StringComparison.Ordinal);
         Assert.Contains("only this code", Code("en", codeOnly: true).Body, StringComparison.Ordinal);
         Assert.Contains("nur diesen Code", Code("de", codeOnly: true).Body, StringComparison.Ordinal);
+
+        // Password + code is accepted in code-only mode too; the email says so (useful on TVs).
+        Assert.Contains("add the code at the end", Code("en", codeOnly: true).Body, StringComparison.Ordinal);
+        Assert.Contains("hänge den Code an", Code("de", codeOnly: true).Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("add the code at the end", Code("en").Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Subject_NamesTheApp_ShortAndSingleLine()
+    {
+        var m = NotificationService.BuildCodeEmail("en", false, "MyServer", "a@example.com", "alice", "12345678", "TV", "Jellyfin Android TV", "203.0.113.5", 10, Now);
+        Assert.Equal("MyServer: sign-in code for Jellyfin Android TV", m.Subject);
+
+        var longApp = new string('x', 100) + "\r\nBcc: evil@example.com";
+        m = NotificationService.BuildCodeEmail("en", false, "MyServer", "a@example.com", "alice", "12345678", "TV", longApp, "203.0.113.5", 10, Now);
+        Assert.DoesNotContain('\n', m.Subject);
+        Assert.True(m.Subject.Length <= "MyServer: sign-in code for ".Length + NotificationService.MaxSubjectClientLength);
+        Assert.EndsWith("...", m.Subject, StringComparison.Ordinal);
+
+        m = NotificationService.BuildCodeEmail("en", false, "MyServer", "a@example.com", "alice", "12345678", "TV", null, "203.0.113.5", 10, Now);
+        Assert.Equal("MyServer: sign-in code", m.Subject);
     }
 
     [Fact]

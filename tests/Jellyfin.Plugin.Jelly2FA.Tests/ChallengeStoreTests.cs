@@ -75,11 +75,59 @@ public class ChallengeStoreTests
         Assert.Equal(VerifyResult.NoChallenge, store.Verify(Bind(), code, Fp, 5));
     }
 
+    /// <summary>Issues <paramref name="count"/> distinct codes for the binding, one second apart.</summary>
+    private List<string> IssueDistinct(ChallengeStore store, int count, ChallengeBinding? binding = null, string? ip = null)
+    {
+        var codes = new List<string>();
+        while (codes.Count < count)
+        {
+            var code = store.Issue(binding ?? Bind(), Fp, TimeSpan.FromMinutes(10), 3, ip);
+            if (!codes.Contains(code))
+            {
+                codes.Add(code);
+            }
+
+            _time.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        return codes;
+    }
+
     [Fact]
-    public void Reissue_ReplacesPreviousCode()
+    public void Reissue_KeepsEarlierCodesValid()
+    {
+        var store = Store();
+        var codes = IssueDistinct(store, 2);
+        Assert.Equal(1, store.Count); // one binding
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), codes[0], Fp, 5)); // the code from the first email
+    }
+
+    [Fact]
+    public void Reissue_UsingOneCode_ConsumesAllCodesOfTheBinding()
+    {
+        var store = Store();
+        var codes = IssueDistinct(store, 3);
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), codes[1], Fp, 5));
+        Assert.Equal(VerifyResult.NoChallenge, store.Verify(Bind(), codes[0], Fp, 5));
+        Assert.Equal(VerifyResult.NoChallenge, store.Verify(Bind(), codes[2], Fp, 5));
+        Assert.True(store.IsKnownCode(Bind().UserId, codes[2])); // still recognised as stale later
+    }
+
+    [Fact]
+    public void Reissue_KeepsOnlyTheNewestCodes()
+    {
+        var store = Store();
+        var codes = IssueDistinct(store, ChallengeStore.MaxCodesPerBinding + 1);
+        Assert.Equal(VerifyResult.Stale, store.Verify(Bind(), codes[0], Fp, 5)); // dropped: known, not counted
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), codes[^1], Fp, 5));
+    }
+
+    [Fact]
+    public void Reissue_EachCodeExpiresOnItsOwn()
     {
         var store = Store();
         var first = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        _time.Advance(TimeSpan.FromMinutes(6));
         string second;
         do
         {
@@ -87,28 +135,86 @@ public class ChallengeStoreTests
         }
         while (second == first);
 
-        Assert.Equal(VerifyResult.Stale, store.Verify(Bind(), first, Fp, 5)); // replaced: known, not counted
+        _time.Advance(TimeSpan.FromMinutes(5)); // first expired, second still valid
+        Assert.Equal(VerifyResult.Stale, store.Verify(Bind(), first, Fp, 5));
+        Assert.Equal(_time.GetUtcNow() - TimeSpan.FromMinutes(5), store.GetIssuedAt(Bind())); // newest code
         Assert.Equal(VerifyResult.Success, store.Verify(Bind(), second, Fp, 5));
+    }
+
+    [Fact]
+    public void Reissue_ResetsWrongEntries()
+    {
+        var store = Store();
+        var code = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        var wrong = code == "00000000" ? "00000001" : "00000000";
+        Assert.Equal(VerifyResult.WrongCode, store.Verify(Bind(), wrong, Fp, 2));
+        var second = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        if (second != wrong)
+        {
+            Assert.Equal(VerifyResult.WrongCode, store.Verify(Bind(), wrong, Fp, 2));
+            Assert.Equal(VerifyResult.Success, store.Verify(Bind(), code, Fp, 2));
+        }
+    }
+
+    [Fact]
+    public void Reissue_AfterPasswordChange_DropsEarlierCodes()
+    {
+        var store = Store();
+        var first = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        var fp2 = ChallengeStore.Fingerprint("hash-2");
+        string second;
+        do
+        {
+            second = store.Issue(Bind(), fp2, TimeSpan.FromMinutes(10), 3);
+        }
+        while (second == first);
+
+        Assert.Equal(VerifyResult.Stale, store.Verify(Bind(), first, fp2, 5));
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), second, fp2, 5));
+    }
+
+    [Fact]
+    public void Reissue_RequiredIp_IsCheckedPerCode()
+    {
+        var store = Store();
+        var first = IssueDistinct(store, 1, ip: "203.0.113.5")[0];
+        string second;
+        do
+        {
+            second = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3, "198.51.100.7");
+        }
+        while (second == first);
+
+        Assert.Equal(VerifyResult.IpMismatch, store.Verify(Bind(), first, Fp, 5, "198.51.100.7"));
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), first, Fp, 5, "203.0.113.5"));
+    }
+
+    [Fact]
+    public void Remove_DropsOnlyThatCode()
+    {
+        var store = Store();
+        var codes = IssueDistinct(store, 2);
+        store.Remove(Bind(), codes[1]);
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), codes[0], Fp, 5));
+
+        var only = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
+        store.Remove(Bind(), only);
+        Assert.False(store.HasPending(Bind()));
     }
 
     [Fact]
     public void StaleCodes_AreNotCountedAsWrongEntries()
     {
         var store = Store();
-        var first = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
-        string second;
-        do
-        {
-            second = store.Issue(Bind(), Fp, TimeSpan.FromMinutes(10), 3);
-        }
-        while (second == first);
+        var codes = IssueDistinct(store, ChallengeStore.MaxCodesPerBinding + 1);
+        var first = codes[0]; // dropped from the pending codes, but known
 
         for (var i = 0; i < 10; i++)
         {
             Assert.Equal(VerifyResult.Stale, store.Verify(Bind(), first, Fp, 2));
         }
 
-        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), second, Fp, 2));
+        Assert.Equal(VerifyResult.Success, store.Verify(Bind(), codes[^1], Fp, 2));
     }
 
     [Fact]
