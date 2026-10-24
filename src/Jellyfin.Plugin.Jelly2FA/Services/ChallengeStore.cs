@@ -54,7 +54,9 @@ public enum VerifyResult
 
 /// <summary>
 /// In-memory store of pending one-time codes. Codes are kept only as HMACs keyed with a per-process
-/// random key, are single use, expire, and allow a limited number of wrong entries. All operations are
+/// random key, are single use, expire, and allow a limited number of wrong entries. Up to
+/// <see cref="MaxCodesPerBinding"/> codes can be pending per binding (one per email); using one consumes all
+/// of them. All operations are
 /// serialised by a lock so concurrent redemptions of the same code cannot both succeed.
 /// Restarting Jellyfin simply discards pending codes.
 /// <para>
@@ -78,6 +80,13 @@ public sealed class ChallengeStore
     /// <summary>How many issued codes are remembered per user.</summary>
     internal const int MaxKnownCodesPerUser = 10;
 
+    /// <summary>
+    /// How many codes can be pending at once for one binding (user, device, app). Signing in again with the
+    /// password after the resend cooldown sends a new code; the codes from the previous emails keep working until
+    /// they expire, so the user does not have to find the newest email.
+    /// </summary>
+    internal const int MaxCodesPerBinding = 3;
+
     private readonly object _lock = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private readonly Dictionary<Guid, ReuseGrant> _grants = new();
@@ -94,11 +103,14 @@ public sealed class ChallengeStore
         _time = time;
     }
 
-    /// <summary>Creates a new code for the binding, replacing any previous one for the same binding.</summary>
+    /// <summary>
+    /// Creates a new code for the binding. Earlier codes of the same binding stay valid until they expire (at most
+    /// <see cref="MaxCodesPerBinding"/>, oldest dropped first); a new code also resets the wrong-entry counter.
+    /// </summary>
     /// <param name="binding">Binding.</param>
     /// <param name="passwordFingerprint">Fingerprint of the stored password hash at issue time.</param>
     /// <param name="lifetime">Lifetime.</param>
-    /// <param name="maxPendingPerUser">Maximum pending codes per user (oldest evicted).</param>
+    /// <param name="maxPendingPerUser">Maximum bindings with pending codes per user (oldest evicted).</param>
     /// <param name="clientIp">Client IP that requested the code (used for code-only verification).</param>
     /// <returns>The plaintext code (to be emailed, never stored).</returns>
     public string Issue(ChallengeBinding binding, byte[] passwordFingerprint, TimeSpan lifetime, int maxPendingPerUser, string? clientIp = null)
@@ -108,11 +120,27 @@ public sealed class ChallengeStore
         lock (_lock)
         {
             PruneExpired(now);
-            _entries[binding.Key] = new Entry(binding.UserId, Mac(binding, code), passwordFingerprint, now, now + lifetime, clientIp);
+            var issued = new IssuedCode(Mac(binding, code), now, now + lifetime, clientIp);
+            if (_entries.TryGetValue(binding.Key, out var entry)
+                && CryptographicOperations.FixedTimeEquals(entry.PasswordFingerprint, passwordFingerprint))
+            {
+                entry.Codes.Add(issued);
+                if (entry.Codes.Count > MaxCodesPerBinding)
+                {
+                    entry.Codes.RemoveRange(0, entry.Codes.Count - MaxCodesPerBinding);
+                }
+
+                entry.FailedAttempts = 0;
+            }
+            else
+            {
+                _entries[binding.Key] = new Entry(binding.UserId, passwordFingerprint, issued);
+            }
+
             RememberLocked(binding.UserId, UserMac(binding.UserId, code), now);
 
             var forUser = _entries.Where(e => e.Value.UserId == binding.UserId)
-                .OrderBy(e => e.Value.CreatedUtc)
+                .OrderBy(e => e.Value.LastIssuedUtc)
                 .ToList();
             var excess = forUser.Count - Math.Max(1, maxPendingPerUser);
             for (var i = 0; i < excess; i++)
@@ -124,7 +152,7 @@ public sealed class ChallengeStore
         return code;
     }
 
-    /// <summary>Gets when the current code for the binding was issued, if one is pending.</summary>
+    /// <summary>Gets when the newest code for the binding was issued, if a code is pending.</summary>
     /// <param name="binding">Binding.</param>
     /// <returns>Issue time or null.</returns>
     public DateTimeOffset? GetIssuedAt(ChallengeBinding binding)
@@ -132,11 +160,14 @@ public sealed class ChallengeStore
         lock (_lock)
         {
             PruneExpired(_time.GetUtcNow());
-            return _entries.TryGetValue(binding.Key, out var e) ? e.CreatedUtc : null;
+            return _entries.TryGetValue(binding.Key, out var e) ? e.LastIssuedUtc : null;
         }
     }
 
-    /// <summary>Checks a code. Success consumes it.</summary>
+    /// <summary>
+    /// Checks a code against every pending code of the binding. Success consumes all of them (one sign-in per
+    /// binding), so the other codes from earlier emails become stale.
+    /// </summary>
     /// <param name="binding">Binding.</param>
     /// <param name="code">Entered code.</param>
     /// <param name="passwordFingerprint">Current fingerprint of the stored password hash.</param>
@@ -153,7 +184,8 @@ public sealed class ChallengeStore
                 return VerifyResult.NoChallenge;
             }
 
-            if (entry.ExpiresUtc <= now)
+            entry.Codes.RemoveAll(c => c.ExpiresUtc <= now);
+            if (entry.Codes.Count == 0)
             {
                 _entries.Remove(binding.Key);
                 return VerifyResult.Expired;
@@ -165,10 +197,21 @@ public sealed class ChallengeStore
                 return VerifyResult.PasswordChanged;
             }
 
+            // Compare against every pending code (no early exit), then decide.
+            var mac = Mac(binding, code);
+            IssuedCode? match = null;
+            foreach (var pending in entry.Codes)
+            {
+                if (CryptographicOperations.FixedTimeEquals(pending.CodeMac, mac))
+                {
+                    match = pending;
+                }
+            }
+
+            var codeOk = match is not null;
             var ipOk = requiredIp is null
-                || (entry.ClientIp is not null && string.Equals(entry.ClientIp, requiredIp, StringComparison.Ordinal));
-            var codeOk = CryptographicOperations.FixedTimeEquals(entry.CodeMac, Mac(binding, code));
-            if (ipOk && codeOk)
+                || (match?.ClientIp is not null && string.Equals(match.ClientIp, requiredIp, StringComparison.Ordinal));
+            if (codeOk && ipOk)
             {
                 _entries.Remove(binding.Key);
                 return VerifyResult.Success;
@@ -195,13 +238,27 @@ public sealed class ChallengeStore
     /// <returns>True if pending.</returns>
     public bool HasPending(ChallengeBinding binding) => GetIssuedAt(binding) is not null;
 
-    /// <summary>Drops the pending code of one binding (e.g. the code email could not be queued).</summary>
+    /// <summary>
+    /// Drops one pending code of a binding (e.g. its email could not be queued). Earlier codes of the binding
+    /// stay valid.
+    /// </summary>
     /// <param name="binding">Binding.</param>
-    public void Remove(ChallengeBinding binding)
+    /// <param name="code">The code to drop.</param>
+    public void Remove(ChallengeBinding binding, string code)
     {
         lock (_lock)
         {
-            _entries.Remove(binding.Key);
+            if (!_entries.TryGetValue(binding.Key, out var entry))
+            {
+                return;
+            }
+
+            var mac = Mac(binding, code);
+            entry.Codes.RemoveAll(c => CryptographicOperations.FixedTimeEquals(c.CodeMac, mac));
+            if (entry.Codes.Count == 0)
+            {
+                _entries.Remove(binding.Key);
+            }
         }
     }
 
@@ -387,7 +444,12 @@ public sealed class ChallengeStore
 
     private void PruneExpired(DateTimeOffset now)
     {
-        foreach (var key in _entries.Where(e => e.Value.ExpiresUtc <= now).Select(e => e.Key).ToList())
+        foreach (var entry in _entries.Values)
+        {
+            entry.Codes.RemoveAll(c => c.ExpiresUtc <= now);
+        }
+
+        foreach (var key in _entries.Where(e => e.Value.Codes.Count == 0).Select(e => e.Key).ToList())
         {
             _entries.Remove(key);
         }
@@ -421,29 +483,26 @@ public sealed class ChallengeStore
         public int FailedAttempts { get; set; }
     }
 
+    /// <summary>One emailed code of a binding.</summary>
+    private sealed record IssuedCode(byte[] CodeMac, DateTimeOffset CreatedUtc, DateTimeOffset ExpiresUtc, string? ClientIp);
+
+    /// <summary>The pending codes of one binding (oldest first, never empty while stored).</summary>
     private sealed class Entry
     {
-        public Entry(Guid userId, byte[] codeMac, byte[] passwordFingerprint, DateTimeOffset createdUtc, DateTimeOffset expiresUtc, string? clientIp)
+        public Entry(Guid userId, byte[] passwordFingerprint, IssuedCode first)
         {
             UserId = userId;
-            CodeMac = codeMac;
             PasswordFingerprint = passwordFingerprint;
-            CreatedUtc = createdUtc;
-            ExpiresUtc = expiresUtc;
-            ClientIp = clientIp;
+            Codes = new List<IssuedCode>(MaxCodesPerBinding) { first };
         }
-
-        public string? ClientIp { get; }
 
         public Guid UserId { get; }
 
-        public byte[] CodeMac { get; }
-
         public byte[] PasswordFingerprint { get; }
 
-        public DateTimeOffset CreatedUtc { get; }
+        public List<IssuedCode> Codes { get; }
 
-        public DateTimeOffset ExpiresUtc { get; }
+        public DateTimeOffset LastIssuedUtc => Codes.Count == 0 ? DateTimeOffset.MinValue : Codes[^1].CreatedUtc;
 
         public int FailedAttempts { get; set; }
     }

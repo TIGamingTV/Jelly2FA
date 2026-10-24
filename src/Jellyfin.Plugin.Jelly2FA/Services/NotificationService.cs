@@ -48,6 +48,9 @@ public sealed class NotificationService : INotificationService
     /// <summary>Maximum length of client-supplied text (device/app name) in user emails.</summary>
     internal const int MaxClientTextLength = 64;
 
+    /// <summary>Maximum length of the app name in the code email's subject.</summary>
+    internal const int MaxSubjectClientLength = 32;
+
     private readonly EmailQueue _queue;
     private readonly IConfigProvider _config;
     private readonly RateLimiter _limiter;
@@ -206,9 +209,10 @@ public sealed class NotificationService : INotificationService
         var server = EmailAddress.SingleLine(serverName);
         var user = Clean(userName, t);
         var time = FormatTime(now, zone);
-        var howTo = codeOnly ? t.HowToCodeOnly : t.HowToPasswordPlusCode;
+        var app = Client(client, t);
+        var howTo = codeOnly ? t.HowToCodeOnly + " " + t.CodeOnlyAlternative : t.HowToPasswordPlusCode;
         var example = codeOnly ? null : t.ExamplePassword + code;
-        var validity = string.Format(CultureInfo.InvariantCulture, t.Validity, lifetimeMinutes);
+        var validity = string.Format(CultureInfo.InvariantCulture, t.Validity, lifetimeMinutes, app);
         if (reuse is { Count: > 0 } r && r.Clients.Count > 0)
         {
             validity += " " + string.Format(
@@ -221,7 +225,7 @@ public sealed class NotificationService : INotificationService
         var details = new (string Label, string Value)[]
         {
             (t.Device, Client(device, t)),
-            (t.App, Client(client, t)),
+            (t.App, app),
             (t.Ip, Client(clientIp, t)),
             (t.Time, time),
         };
@@ -239,7 +243,7 @@ public sealed class NotificationService : INotificationService
             text.AppendLine(CultureInfo.InvariantCulture, $"{t.ExampleLabel} {example}");
         }
 
-        text.AppendLine().AppendLine(validity).AppendLine();
+        text.AppendLine().AppendLine(validity).AppendLine(t.Resend).AppendLine();
         foreach (var (label, value) in details)
         {
             text.AppendLine(CultureInfo.InvariantCulture, $"{(label + ":").PadRight(8)}{value}");
@@ -262,7 +266,7 @@ public sealed class NotificationService : INotificationService
                 .Append("<b>").Append(Html(code)).Append("</b></code>");
         }
 
-        h.Append("</p><p>").Append(Html(validity)).Append("</p>")
+        h.Append("</p><p>").Append(Html(validity)).Append("<br>").Append(Html(t.Resend)).Append("</p>")
             .Append("<table style=\"border-collapse:collapse;font-size:14px;\">");
         foreach (var (label, value) in details)
         {
@@ -272,7 +276,11 @@ public sealed class NotificationService : INotificationService
 
         h.Append("</table><p style=\"color:#b00020;\">").Append(Html(t.CodeWarning)).Append("</p></body></html>");
 
-        return new EmailMessage(email, string.Format(CultureInfo.InvariantCulture, t.CodeSubject, server), text.ToString(), h.ToString());
+        var subjectApp = Shorten(EmailAddress.SingleLine(client), MaxSubjectClientLength);
+        var subject = subjectApp.Length == 0
+            ? string.Format(CultureInfo.InvariantCulture, t.CodeSubject, server)
+            : string.Format(CultureInfo.InvariantCulture, t.CodeSubjectForApp, server, subjectApp);
+        return new EmailMessage(email, subject, text.ToString(), h.ToString());
     }
 
     /// <summary>Builds the Quick Connect notice.</summary>
@@ -326,11 +334,10 @@ public sealed class NotificationService : INotificationService
     /// Client-supplied values (device/app name, IP text). Whoever triggers the email chooses them, so they are
     /// kept short to limit how much attacker-controlled text ends up in a trusted-looking email.
     /// </summary>
-    private static string Client(string? value, Texts t)
-    {
-        var s = Clean(value, t);
-        return s.Length > MaxClientTextLength ? s[..(MaxClientTextLength - 3)].TrimEnd() + "..." : s;
-    }
+    private static string Client(string? value, Texts t) => Shorten(Clean(value, t), MaxClientTextLength);
+
+    private static string Shorten(string s, int max)
+        => s.Length > max ? s[..(max - 3)].TrimEnd() + "..." : s;
 
     private sealed class Texts
     {
@@ -338,12 +345,15 @@ public sealed class NotificationService : INotificationService
         {
             Greeting = "Hello {0},",
             CodeSubject = "{0}: sign-in code",
+            CodeSubjectForApp = "{0}: sign-in code for {1}",
             CodeIntro = "Someone entered the correct password for your account on {0}. Your sign-in code is:",
             HowToPasswordPlusCode = "To finish signing in, enter your password immediately followed by this code in the password field (no space).",
             HowToCodeOnly = "To finish signing in, sign in again with your user name and enter only this code in the password field (without your password).",
+            CodeOnlyAlternative = "Your password immediately followed by the code works too. Handy on a TV: leave the password in the field, add the code at the end and sign in again.",
             ExampleLabel = "For example:",
             ExamplePassword = "MyPassword",
-            Validity = "The code is valid for {0} minutes, works once, and only on the device that requested it.",
+            Validity = "The code is valid for {0} minutes, works once, and only in the app and on the device that requested it ({1}).",
+            Resend = "Signing in again with only your password sends a new code. Codes from earlier emails for the same app keep working until they expire.",
             Reuse = "Exception: for {1} minutes after you signed in with it, these apps may use the code {0} more time(s), for example when your app signs you in to them: {2}.",
             Device = "Device",
             App = "App",
@@ -361,12 +371,15 @@ public sealed class NotificationService : INotificationService
         {
             Greeting = "Hallo {0},",
             CodeSubject = "{0}: Anmeldecode",
+            CodeSubjectForApp = "{0}: Anmeldecode für {1}",
             CodeIntro = "Jemand hat das richtige Passwort für dein Konto auf {0} eingegeben. Dein Anmeldecode lautet:",
             HowToPasswordPlusCode = "Um die Anmeldung abzuschließen, gib im Passwortfeld dein Passwort direkt gefolgt von diesem Code ein (ohne Leerzeichen).",
             HowToCodeOnly = "Um die Anmeldung abzuschließen, melde dich erneut mit deinem Benutzernamen an und gib im Passwortfeld nur diesen Code ein (ohne dein Passwort).",
+            CodeOnlyAlternative = "Dein Passwort direkt gefolgt vom Code funktioniert ebenfalls. Praktisch am Fernseher: Lass das Passwort im Feld stehen, hänge den Code an und melde dich erneut an.",
             ExampleLabel = "Zum Beispiel:",
             ExamplePassword = "MeinPasswort",
-            Validity = "Der Code ist {0} Minuten gültig, funktioniert nur einmal und nur auf dem Gerät, das ihn angefordert hat.",
+            Validity = "Der Code ist {0} Minuten gültig, funktioniert nur einmal und nur in der App und auf dem Gerät, die ihn angefordert haben ({1}).",
+            Resend = "Wenn du dich erneut nur mit deinem Passwort anmeldest, bekommst du einen neuen Code. Codes aus früheren E-Mails für dieselbe App funktionieren weiter, bis sie ablaufen.",
             Reuse = "Ausnahme: {1} Minuten lang nach deiner Anmeldung damit dürfen diese Apps den Code noch {0}-mal verwenden, zum Beispiel wenn deine App dich dort anmeldet: {2}.",
             Device = "Gerät",
             App = "App",
@@ -384,11 +397,17 @@ public sealed class NotificationService : INotificationService
 
         public required string CodeSubject { get; init; }
 
+        public required string CodeSubjectForApp { get; init; }
+
         public required string CodeIntro { get; init; }
 
         public required string HowToPasswordPlusCode { get; init; }
 
         public required string HowToCodeOnly { get; init; }
+
+        public required string CodeOnlyAlternative { get; init; }
+
+        public required string Resend { get; init; }
 
         public required string ExampleLabel { get; init; }
 

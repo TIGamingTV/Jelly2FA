@@ -233,7 +233,7 @@ public class ProviderTests
     }
 
     [Fact]
-    public async Task Remote_NewCodeInvalidatesOldOne()
+    public async Task Remote_NewCodeKeepsOldOneValid()
     {
         Request();
         await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
@@ -241,15 +241,46 @@ public class ProviderTests
         Request();
         await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
         Assert.Equal(2, _notifications.Codes.Count);
+
+        // The code from the first email still works; using it ends the sign-in, so the second one is stale.
+        Request();
+        await Auth(Password + _notifications.Codes[0]);
         if (_notifications.Codes[0] != _notifications.Codes[1])
         {
             Request();
-            var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + _notifications.Codes[0]));
+            var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + _notifications.Codes[1]));
             Assert.Contains("no longer valid", ex.Message, StringComparison.Ordinal);
         }
+    }
 
-        Request();
-        await Auth(Password + _notifications.Codes[1]);
+    [Fact]
+    public async Task Remote_CodeOnly_RetriesWithPassword_EarlierEmailStillWorks()
+    {
+        // The reported Android TV case: code-only mode, the app keeps sending the password, the user then
+        // enters the code from an earlier email.
+        _config.AllowCodeOnlySecondStep = true;
+        for (var i = 0; i < 3; i++)
+        {
+            Request(client: "Jellyfin Android TV");
+            await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+            _time.Advance(TimeSpan.FromSeconds(61));
+        }
+
+        Assert.Equal(3, _notifications.Codes.Count);
+        Request(client: "Jellyfin Android TV");
+        await Auth(_notifications.Codes[0]);
+        Assert.True(_approvals.TryConsume(_user.Id, "dev-1"));
+    }
+
+    [Fact]
+    public async Task Remote_CodeOnlyMode_PasswordPlusCodeAlsoWorks()
+    {
+        // On a TV the password is still in the field: appending the code must work in code-only mode too.
+        _config.AllowCodeOnlySecondStep = true;
+        Request(client: "Jellyfin Android TV");
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Request(client: "Jellyfin Android TV");
+        await Auth(Password + _notifications.Codes[0]);
     }
 
     [Fact]
