@@ -49,6 +49,12 @@ public sealed class StatusReport
 
     /// <summary>Gets or sets a value indicating whether the plugin was disabled and users were handed back (2FA off).</summary>
     public bool Disabled { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether CrowdSec makes the per-IP bans (DelegateIpBansToCrowdSec).</summary>
+    public bool IpBansByCrowdSec { get; set; }
+
+    /// <summary>Gets or sets a short description of who blocks IPs and at which limit.</summary>
+    public string IpBans { get; set; } = string.Empty;
 }
 
 /// <summary>Computes plugin health.</summary>
@@ -100,6 +106,10 @@ public sealed class HealthService
             QuickConnectEnabled = _serverConfig.Configuration.QuickConnectAvailable,
             EnrolledUsers = config.Users.Length,
             Disabled = _suspension.IsSuspended,
+            IpBansByCrowdSec = config.DelegateIpBansToCrowdSec,
+            IpBans = config.DelegateIpBansToCrowdSec
+                ? $"CrowdSec (Jelly2FA backstop: {ThrottleService.IpLimit(config)} failures per {ThrottleService.IpWindow(config).TotalMinutes:0} min)"
+                : $"Jelly2FA ({ThrottleService.IpLimit(config)} failures per {ThrottleService.IpWindow(config).TotalMinutes:0} min)",
         };
 
         var suspended = r.Disabled ? _suspension.Load().ToHashSet() : new HashSet<Guid>();
@@ -118,8 +128,18 @@ public sealed class HealthService
             r.Problems.Add("No reverse proxy address configured (Jellyfin 'Known proxies' or plugin 'Proxy addresses'). Fail-closed: LAN/Tailscale sign-ins also require 2FA.");
         }
 
+        if (config.DelegateIpBansToCrowdSec && ThrottleService.IpLimit(config) <= config.MaxFailuresPerIp)
+        {
+            r.Warnings.Add($"IP bans are delegated to CrowdSec, but the Jelly2FA backstop ({ThrottleService.IpLimit(config)}) is not higher than 'Failed sign-ins per IP' ({config.MaxFailuresPerIp}): Jelly2FA still blocks IPs before CrowdSec does. Raise the backstop (default 100).");
+        }
+
         if (r.JellyfinKnownProxies.Length == 0)
         {
+            if (config.DelegateIpBansToCrowdSec)
+            {
+                r.Problems.Add("IP bans are delegated to CrowdSec, but Jellyfin 'Known proxies' is empty: Jellyfin logs every proxied client with the proxy's IP, so CrowdSec would ban the proxy (everyone). Set Known proxies or turn the option off.");
+            }
+
             if (config.AllowCodeOnlySecondStep)
             {
                 r.Problems.Add("'Allow the code alone as the second step' is on, but Jellyfin 'Known proxies' is empty: every remote client has the proxy's IP, so the IP binding of codes protects nothing. Set Known proxies or turn the option off.");

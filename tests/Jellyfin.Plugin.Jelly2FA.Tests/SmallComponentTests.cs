@@ -34,6 +34,64 @@ public class RateLimiterTests
         Assert.True(limiter.TryAcquire("mail", 2, TimeSpan.FromHours(1)));
         Assert.False(limiter.TryAcquire("mail", 2, TimeSpan.FromHours(1)));
     }
+
+    [Fact]
+    public void Snapshot_ByPrefix_PrunesExpired()
+    {
+        var time = new FakeTimeProvider();
+        var limiter = new RateLimiter(time);
+        var window = TimeSpan.FromMinutes(5);
+        limiter.Record("fail:ip:a", window);
+        time.Advance(TimeSpan.FromMinutes(1));
+        limiter.Record("fail:ip:a", window);
+        limiter.Record("fail:ip:b", window);
+        limiter.Record("mail:global", window);
+
+        var snap = limiter.Snapshot("fail:ip:", window).OrderBy(e => e.Key, StringComparer.Ordinal).ToList();
+        Assert.Equal(new[] { "fail:ip:a", "fail:ip:b" }, snap.Select(e => e.Key));
+        Assert.Equal(2, snap[0].Events.Length);
+
+        time.Advance(TimeSpan.FromMinutes(4));
+        snap = limiter.Snapshot("fail:ip:", window).OrderBy(e => e.Key, StringComparer.Ordinal).ToList();
+        Assert.Single(snap[0].Events); // the first event left the window
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        Assert.Empty(limiter.Snapshot("fail:ip:", window));
+    }
+}
+
+public class ThrottleServiceTests
+{
+    [Theory]
+    [InlineData("fail:ip:203.0.113.5", true)]
+    [InlineData("fail:ip:2001:db8::/64", true)]
+    [InlineData("fail:user:0123456789abcdef0123456789abcdef", true)]
+    [InlineData("fail:ip:", false)]
+    [InlineData("fail:user:", false)]
+    [InlineData("mail:global", false)]
+    [InlineData("alert:selfcheck", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void OnlyFailureCountersCanBeCleared(string? key, bool expected)
+    {
+        Assert.Equal(expected, ThrottleService.IsThrottleKey(key));
+        var limiter = new RateLimiter(new FakeTimeProvider());
+        limiter.Record("mail:global", TimeSpan.FromHours(1));
+        var service = new ThrottleService(limiter, new TestConfigProvider(new Configuration.PluginConfiguration()), NSubstitute.Substitute.For<MediaBrowser.Controller.Library.IUserManager>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<ThrottleService>.Instance);
+        Assert.Equal(expected, service.Clear(key));
+        Assert.True(limiter.IsLimited("mail:global", 1, TimeSpan.FromHours(1))); // email budget untouched
+    }
+
+    [Fact]
+    public void IpLimit_DependsOnMode()
+    {
+        var config = new Configuration.PluginConfiguration { MaxFailuresPerIp = 10, CrowdSecIpBackstop = 250 };
+        Assert.Equal(10, ThrottleService.IpLimit(config));
+        config.DelegateIpBansToCrowdSec = true;
+        Assert.Equal(250, ThrottleService.IpLimit(config));
+        config.CrowdSecIpBackstop = -1;
+        Assert.Equal(ThrottleService.DefaultCrowdSecIpBackstop, ThrottleService.IpLimit(config));
+    }
 }
 
 public class LoginEndpointsTests

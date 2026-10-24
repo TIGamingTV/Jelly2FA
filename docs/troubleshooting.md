@@ -47,7 +47,8 @@ All plugin messages in Jellyfin's log start with `Jelly2FA`. Useful entries:
 | `sign-in code emailed to user …` | A code was queued for sending. |
 | `two-factor sign-in (…) completed for user …` | A code was accepted. |
 | `sending email failed: …` | SMTP error. Check the SMTP settings and send a test email. |
-| `throttled sign-in for user … from …` | A failure limit was reached. |
+| `throttled sign-in for user … from … (per-IP limit)` / `(per-user limit)` | A failure limit was reached. Clear it under **Failed sign-in throttles** on the plugin page. |
+| `Jelly2FA: Authentication request for … has been denied (IP: …). Reason: …` | Only with *Let CrowdSec make the IP bans*: a wrong code after a correct password, or an IP blocked by the backstop, logged for CrowdSec. |
 | `Jelly2FA alert: …` | An administrator alert (also emailed if an alert address is set). |
 
 To find out why a LAN sign-in needs a code, look at the `peer` and the reason in the `two-factor required` line.
@@ -83,6 +84,43 @@ whitelist:
 ```
 
 Then run `sudo systemctl reload crowdsec`.
+
+### Let CrowdSec make the IP bans
+
+By default Jelly2FA blocks an IP itself after 10 failed sign-ins in 5 minutes. Those blocks live in Jellyfin's memory, so `cscli` can't see or lift them (the plugin page lists them under **Failed sign-in throttles** with a **Clear** button). To have CrowdSec make the IP bans instead, so you can list and lift them with `cscli`:
+
+1. Make CrowdSec read Jellyfin's log: `sudo cscli collections install crowdsecurity/jellyfin` (installs `LePresidente/jellyfin-logs` and `LePresidente/jellyfin-bf`) and add an acquisition, for example `/etc/crowdsec/acquis.d/jellyfin.yaml`:
+
+   ```yaml
+   filenames:
+     - /var/lib/jellyfin/log/*.log      # Docker: the log folder of the mounted config volume, e.g. /srv/jellyfin/config/log/*.log
+   labels:
+     type: jellyfin
+   ```
+
+2. Set Jellyfin's **Known proxies** to nginx. Otherwise Jellyfin logs the proxy's IP for every client and CrowdSec would ban the proxy; the status page reports this as a problem.
+3. Whitelist your LAN/Tailscale ranges in CrowdSec if they must never be banned (`crowdsecurity/whitelists` covers private ranges).
+4. On the plugin page, under **CrowdSec**, enable **Let CrowdSec make the IP bans** and save. Keep the nginx 403 whitelist from above.
+
+What changes:
+
+- Jelly2FA's per-IP limit is replaced by a high **backstop** (default 100 failures per IP window), so normally CrowdSec bans first.
+- Failures that answer with 403 and that Jellyfin therefore doesn't log as denied are logged by Jelly2FA in the same format, with the user name and the client IP, and counted by `jellyfin-bf`:
+  - a correct password with a wrong code (`Reason: wrong two-factor code`)
+  - an IP blocked by the backstop (`Reason: IP over the Jelly2FA backstop limit`)
+
+  Wrong passwords are already logged by Jellyfin and are not logged twice. A user who mistypes the code several times in a row is counted like one who mistypes the password.
+- Not reported: the per-user limit (10 failures per 15 minutes from any IP). Whoever guesses a user's password must not get the real user's IP banned. Clear it on the plugin page.
+
+Lifting a ban:
+
+```sh
+sudo cscli alerts list                       # what happened, which scenario
+sudo cscli decisions list                    # active bans
+sudo cscli decisions delete --ip 203.0.113.9 # lift one
+```
+
+If the user is still refused afterwards, clear the user's or IP's counter under **Failed sign-in throttles** on the plugin page.
 
 Why this is acceptable: wrong passwords stay 401 and are still counted by every scenario. Guessing codes needs the correct password and is limited by Jelly2FA itself (5 wrong entries per code, codes only emailed after a correct password, 5 emails per user per hour, 10 failures per IP per 5 minutes). Jelly2FA's throttle also answers with 403, but only after repeated failures; wrong passwords among them are still visible to CrowdSec as 401. Jellyfin's own 403s on these routes (disabled account, remote access not allowed, parental schedule) are hidden as well; they never sign anybody in.
 

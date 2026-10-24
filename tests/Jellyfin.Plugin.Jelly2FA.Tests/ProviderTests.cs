@@ -28,6 +28,7 @@ public class ProviderTests
     private readonly RateLimiter _limiter;
     private readonly LoginApprovalRegistry _approvals;
     private readonly HttpContextAccessor _accessor = new();
+    private readonly ListLogger<TwoFactorAuthenticationProvider> _log = new();
     private readonly User _user;
     private bool _trusted;
 
@@ -53,7 +54,7 @@ public class ProviderTests
         _notifications,
         _email,
         new TestConfigProvider(_config),
-        NullLogger<TwoFactorAuthenticationProvider>.Instance,
+        _log,
         _time)
     {
         AuthorizationInfoOverride = ctx => Task.FromResult(new AuthorizationInfo
@@ -786,6 +787,156 @@ public class ProviderTests
         await Assert.ThrowsAsync<SecurityException>(() => Auth(code));
         Request(ip: "192.168.1.30", peer: "192.168.1.30");
         await Assert.ThrowsAsync<AuthenticationException>(() => Auth(code == "12345678" ? "87654321" : "12345678"));
+    }
+
+    // ---- CrowdSec makes the IP bans (DelegateIpBansToCrowdSec) ----
+
+    /// <summary>The grok pattern of the CrowdSec hub parser LePresidente/jellyfin-logs, translated to .NET.</summary>
+    private static readonly System.Text.RegularExpressions.Regex CrowdSecJellyfinParser = new(
+        "Authentication request for \"?(?<user>[a-zA-Z0-9._@+-]+)\"? has been denied \\(IP: \"?(?<ip>[0-9a-fA-F:.]+)\"?\\).*");
+
+    private List<LogEntry> CrowdSecLines() => _log.Entries.Where(e => e.Template == TwoFactorAuthenticationProvider.CrowdSecDeniedTemplate).ToList();
+
+    private string WrongCode() => _notifications.Codes[^1] == "00000000" ? "00000001" : "00000000";
+
+    [Fact]
+    public async Task CrowdSecOff_WrongCode_NoDeniedLine()
+    {
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + WrongCode()));
+        Assert.Empty(CrowdSecLines());
+    }
+
+    [Fact]
+    public async Task CrowdSec_WrongCode_LogsDeniedLineThatTheHubParserReads()
+    {
+        _config.DelegateIpBansToCrowdSec = true;
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password + WrongCode())); // still 403 for the client
+
+        var line = Assert.Single(CrowdSecLines());
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, line.Level);
+        Assert.Equal("alice", line.Values["UserName"]);
+        Assert.Equal("203.0.113.5", line.Values["IP"]);
+
+        // Microsoft.Extensions.Logging renders strings bare, Jellyfin's Serilog renders them quoted: both must match.
+        var bare = CrowdSecJellyfinParser.Match(line.Message);
+        Assert.True(bare.Success, line.Message);
+        Assert.Equal("alice", bare.Groups["user"].Value);
+        Assert.Equal("203.0.113.5", bare.Groups["ip"].Value);
+        var serilog = line.Template!.Replace("{UserName}", "\"alice\"", StringComparison.Ordinal).Replace("{IP}", "\"203.0.113.5\"", StringComparison.Ordinal);
+        var quoted = CrowdSecJellyfinParser.Match("[2026-10-24 12:00:00.000 +00:00] [WRN] [42] Jellyfin.Plugin.Jelly2FA.Services.TwoFactorAuthenticationProvider: " + serilog);
+        Assert.True(quoted.Success, serilog);
+        Assert.Equal("alice", quoted.Groups["user"].Value);
+        Assert.Equal("203.0.113.5", quoted.Groups["ip"].Value);
+    }
+
+    [Fact]
+    public async Task CrowdSec_WrongPasswords_NotLoggedTwice()
+    {
+        _config.DelegateIpBansToCrowdSec = true;
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong")); // 401: Jellyfin logs it itself
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Request();
+        await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + _notifications.Codes[^1]));
+        Assert.Empty(CrowdSecLines());
+    }
+
+    [Fact]
+    public async Task CrowdSec_IpLimitIsTheBackstop()
+    {
+        _config.DelegateIpBansToCrowdSec = true;
+        _config.CrowdSecIpBackstop = 20;
+        _config.MaxFailuresPerUser = 1000; // isolate the per-IP bucket
+        for (var i = 0; i < 20; i++)
+        {
+            Request();
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + i)); // past MaxFailuresPerIp (10)
+        }
+
+        Assert.Empty(CrowdSecLines());
+        Request();
+        var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Contains("Too many", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(_notifications.Codes);
+        var line = Assert.Single(CrowdSecLines());
+        Assert.Equal("203.0.113.5", line.Values["IP"]);
+    }
+
+    [Fact]
+    public async Task CrowdSec_EmptyBackstop_UsesTheDefault()
+    {
+        _config.DelegateIpBansToCrowdSec = true;
+        _config.CrowdSecIpBackstop = 0;
+        _config.MaxFailuresPerUser = 1000;
+        for (var i = 0; i < 15; i++)
+        {
+            Request();
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + i));
+        }
+
+        Request();
+        var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password)); // an empty field is not "ban after 1"
+        Assert.Contains("code was sent", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(ThrottleService.DefaultCrowdSecIpBackstop, ThrottleService.IpLimit(_config));
+    }
+
+    [Fact]
+    public async Task CrowdSec_PerUserLimitStays_AndIsNotReported()
+    {
+        _config.DelegateIpBansToCrowdSec = true;
+        for (var i = 0; i < 10; i++)
+        {
+            Request(ip: "198.51.100." + (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + i));
+        }
+
+        Request(ip: "203.0.113.99");
+        var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Contains("Too many", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(CrowdSecLines()); // the user's own IP must not be banned because someone guessed the password
+    }
+
+    [Fact]
+    public async Task ClearingThrottles_EndsTheBlock()
+    {
+        for (var i = 0; i < 10; i++)
+        {
+            Request();
+            await Assert.ThrowsAsync<AuthenticationException>(() => Auth("wrong" + i));
+        }
+
+        var users = Substitute.For<MediaBrowser.Controller.Library.IUserManager>();
+        users.GetUserById(_user.Id).Returns(_user);
+        var throttles = new ThrottleService(_limiter, new TestConfigProvider(_config), users, NullLogger<ThrottleService>.Instance);
+        var entries = throttles.List();
+        Assert.Equal(2, entries.Count);
+        Assert.All(entries, e => Assert.True(e.Blocked));
+        var ip = Assert.Single(entries, e => e.Kind == "ip");
+        Assert.Equal("203.0.113.5", ip.Subject);
+        Assert.Equal(10, ip.Failures);
+        Assert.Equal(10, ip.Limit);
+        Assert.Equal(_time.GetUtcNow() + TimeSpan.FromMinutes(5), ip.BlockedUntil);
+        var user = Assert.Single(entries, e => e.Kind == "user");
+        Assert.Equal("alice", user.Subject);
+        Assert.Equal(_time.GetUtcNow() + TimeSpan.FromMinutes(15), user.BlockedUntil);
+
+        Request();
+        await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Empty(_notifications.Codes);
+
+        Assert.True(throttles.Clear(ip.Key));
+        Assert.True(throttles.Clear(user.Key));
+        Assert.Empty(throttles.List());
+        Request();
+        var ex = await Assert.ThrowsAsync<SecurityException>(() => Auth(Password));
+        Assert.Contains("code was sent", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

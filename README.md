@@ -17,7 +17,7 @@ It is for people who expose Jellyfin to the internet through a reverse proxy and
 - **Fail closed:** anything unclear (an unknown proxy, forwarding headers, missing data) requires the code. Forged forwarding headers can only ever *add* the code requirement.
 - **Applies to everyone, including administrators.** API keys are not affected.
 - **Quick Connect** keeps working (optionally with an email notice per sign-in, or disabled for enrolled users).
-- **Abuse limits:** per-IP and per-user failure throttling, email budgets, resend cooldown, limited wrong code entries.
+- **Abuse limits:** per-IP and per-user failure throttling (visible and clearable on the plugin page), email budgets, resend cooldown, limited wrong code entries. Optionally CrowdSec makes the IP bans.
 - **Optional:** code alone as the second step, and code reuse for apps such as Seerr that sign in with credentials another app (Neptune) just used.
 - **Admin tooling:** status page with health checks, admin alert emails, anonymous health endpoint, an external watchdog script and an offline recovery script.
 - User emails in English or German, with times in the server's (or a configured) time zone.

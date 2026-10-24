@@ -146,7 +146,16 @@ Off by default. See [Code reuse (Seerr, Neptune)](usage.md#code-reuse-seerr-nept
 | Failed sign-ins per IP / IP window | `10` / `5` minutes | IPv6 clients are counted per /64. |
 | Failed sign-ins per user / User window | `10` / `15` minutes | Applies to sign-ins through the proxy only, so remote failures cannot lock a user out of the LAN. |
 
-What counts as a failed sign-in is described in [Abuse limits](usage.md#abuse-limits).
+What counts as a failed sign-in is described in [Abuse limits](usage.md#abuse-limits). Current counters can be seen and cleared on the plugin page under **Failed sign-in throttles**.
+
+### CrowdSec
+
+Off by default. See [Let CrowdSec make the IP bans](troubleshooting.md#let-crowdsec-make-the-ip-bans).
+
+| Setting | Default | Description |
+|---|---|---|
+| Let CrowdSec make the IP bans | off | *Failed sign-ins per IP* is no longer applied; only the backstop below is. Wrong codes after a correct password (403) and IPs blocked by the backstop are logged as `Jelly2FA: Authentication request for "<user>" has been denied (IP: "<ip>"). Reason: …`, the line CrowdSec's Jellyfin parser reads, so CrowdSec counts them like wrong passwords. The per-user limit stays. Requires Jellyfin *Known proxies* (otherwise the status page shows a problem). |
+| Backstop: failed sign-ins per IP that Jelly2FA still blocks | `100` | Within the *IP window*. A safety net if CrowdSec is not running; keep it well above CrowdSec's threshold. Empty or `0` = `100`. |
 
 ## Environment variables
 

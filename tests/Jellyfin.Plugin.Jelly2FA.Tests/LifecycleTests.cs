@@ -294,6 +294,29 @@ public sealed class LifecycleTests : IDisposable
     }
 
     [Fact]
+    public void Health_CrowdSec_NeedsKnownProxies_AndAHigherBackstop()
+    {
+        AddUser("alice", ProviderIds.Jelly2Fa);
+        var report = Health(new[] { "192.168.1.10" });
+        Assert.False(report.IpBansByCrowdSec);
+        Assert.StartsWith("Jelly2FA (10 failures per 5 min)", report.IpBans, StringComparison.Ordinal);
+
+        _config.DelegateIpBansToCrowdSec = true;
+        report = Health(new[] { "192.168.1.10" });
+        Assert.True(report.Healthy, string.Join("; ", report.Problems));
+        Assert.True(report.IpBansByCrowdSec);
+        Assert.Equal("CrowdSec (Jelly2FA backstop: 100 failures per 5 min)", report.IpBans);
+        Assert.DoesNotContain(report.Warnings, w => w.Contains("backstop", StringComparison.Ordinal));
+
+        report = Health(Array.Empty<string>());
+        Assert.False(report.Healthy);
+        Assert.Contains(report.Problems, p => p.Contains("CrowdSec would ban the proxy", StringComparison.Ordinal));
+
+        _config.CrowdSecIpBackstop = 5;
+        Assert.Contains(Health(new[] { "192.168.1.10" }).Warnings, w => w.Contains("backstop (5) is not higher", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Health_CodeReuse_Warnings()
     {
         AddUser("alice", ProviderIds.Jelly2Fa);

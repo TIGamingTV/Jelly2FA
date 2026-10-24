@@ -24,12 +24,21 @@ namespace Jellyfin.Plugin.Jelly2FA.Services;
 /// failed sign-in). Everything that follows a correct password (code required, code wrong, no code pending), a
 /// recently issued but no longer valid code, throttling and misconfiguration -> 403
 /// (MediaBrowser.Controller.Net.SecurityException, which Jellyfin does not count as a failed sign-in).
+/// With <c>DelegateIpBansToCrowdSec</c>, wrong codes and per-IP blocks are additionally logged in the format of
+/// Jellyfin's "has been denied" line so that CrowdSec bans the IP (see <see cref="CrowdSecDeniedTemplate"/>).
 /// </summary>
 public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, IRequiresResolvedUser
 {
     private const string InvalidCredentials = "Invalid username or password.";
     private const string Throttled = "Too many failed sign-in attempts. Try again later.";
     private const string GlobalMailKey = "mail:global";
+
+    /// <summary>
+    /// Log line for CrowdSec (<c>DelegateIpBansToCrowdSec</c>). Must keep matching the hub parser
+    /// LePresidente/jellyfin-logs: <c>Authentication request for "?USER"? has been denied \(IP: "?IP"?\).*</c>
+    /// (the same text Jellyfin core logs for a 401).
+    /// </summary>
+    internal const string CrowdSecDeniedTemplate = "Jelly2FA: Authentication request for {UserName} has been denied (IP: {IP}). Reason: {Reason}";
 
     private const string StaleCode = "Jelly2FA: this sign-in code is no longer valid (already used, expired, or requested by another device). Sign in with your password to get a new code.";
 
@@ -173,8 +182,8 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
             throw new SecurityException("Jelly2FA is not ready.");
         }
 
-        var userKey = "fail:user:" + resolvedUser.Id.ToString("N", CultureInfo.InvariantCulture);
-        var userWindow = TimeSpan.FromMinutes(Math.Max(1, config.UserWindowMinutes));
+        var userKey = ThrottleService.UserKey(resolvedUser.Id);
+        var userWindow = ThrottleService.UserWindow(config);
 
         if (kind == LoginKind.PasswordCheck)
         {
@@ -197,19 +206,27 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
         }
 
         var clientIp = IpUtil.Normalize(http.Connection.RemoteIpAddress);
-        var ipKey = "fail:ip:" + IpUtil.ThrottleKey(http.Connection.RemoteIpAddress);
-        var ipWindow = TimeSpan.FromMinutes(Math.Max(1, config.IpWindowMinutes));
+        var ipKey = ThrottleService.IpPrefix + IpUtil.ThrottleKey(http.Connection.RemoteIpAddress);
+        var ipWindow = ThrottleService.IpWindow(config);
         var captured = OriginCaptureMiddleware.Get(http);
         var origin = _originClassifier.Classify(captured);
 
         // Every attempt takes a failure slot up front (atomically, so parallel requests cannot all pass the
         // check) and gives it back unless it really failed. Direct LAN/Tailscale sign-ins are only throttled
         // per IP: failures through the proxy must not be able to lock the user out of the LAN.
+        // With DelegateIpBansToCrowdSec the per-IP limit is only a high backstop; CrowdSec makes the bans.
         using var slots = new FailureSlots(_limiter);
-        if (!slots.TryTake(ipKey, config.MaxFailuresPerIp, ipWindow)
-            || (!origin.TrustedDirect && !slots.TryTake(userKey, config.MaxFailuresPerUser, userWindow)))
+        if (!slots.TryTake(ipKey, ThrottleService.IpLimit(config), ipWindow))
         {
-            _logger.LogWarning("Jelly2FA: throttled sign-in for user {UserId} from {Ip}", resolvedUser.Id, clientIp);
+            _logger.LogWarning("Jelly2FA: throttled sign-in for user {UserId} from {Ip} (per-IP limit)", resolvedUser.Id, clientIp);
+            ReportToCrowdSec(config, resolvedUser, clientIp, "IP over the Jelly2FA backstop limit");
+            throw new SecurityException(Throttled);
+        }
+
+        // Not reported to CrowdSec: whoever guesses a user's password must not get the user's own IP banned.
+        if (!origin.TrustedDirect && !slots.TryTake(userKey, config.MaxFailuresPerUser, userWindow))
+        {
+            _logger.LogWarning("Jelly2FA: throttled sign-in for user {UserId} from {Ip} (per-user limit)", resolvedUser.Id, clientIp);
             throw new SecurityException(Throttled);
         }
 
@@ -304,6 +321,7 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
                     throw new SecurityException(StaleCode);
                 case CodeCheck.Wrong:
                     _logger.LogWarning("Jelly2FA: correct password but wrong code for user {UserId} from {Ip}", resolvedUser.Id, clientIp);
+                    ReportToCrowdSec(config, resolvedUser, clientIp, "wrong two-factor code");
                     slots.Commit();
                     throw new SecurityException("Jelly2FA: password correct, but the code is wrong. Check the code from the email, or sign in with only your password to get a new code.");
                 default:
@@ -609,6 +627,21 @@ public sealed class TwoFactorAuthenticationProvider : IAuthenticationProvider, I
 
         _logger.LogInformation("Jelly2FA: sign-in code emailed to user {UserId} (client {Client}, ip {Ip})", user.Id, EmailAddress.SingleLine(auth.Client), clientIp);
         return IssueOutcome.Sent;
+    }
+
+    /// <summary>
+    /// With <c>DelegateIpBansToCrowdSec</c>: logs a failure that Jellyfin does not log itself (it answers with 403)
+    /// in the format of Jellyfin's own "has been denied" line, so CrowdSec's Jellyfin parser and scenarios count it.
+    /// Only for failures caused by the client at <paramref name="clientIp"/>; 401 failures are already logged by Jellyfin.
+    /// </summary>
+    private void ReportToCrowdSec(Configuration.PluginConfiguration config, User user, string clientIp, string reason)
+    {
+        if (!config.DelegateIpBansToCrowdSec || clientIp == IpUtil.Unknown)
+        {
+            return;
+        }
+
+        _logger.LogWarning(CrowdSecDeniedTemplate, EmailAddress.SingleLine(user.Username), clientIp, reason);
     }
 
     private bool VerifyPassword(User user, string password)

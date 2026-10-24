@@ -153,7 +153,7 @@ Notes:
 All limits are configurable, see [Limits](configuration.md#limits). Defaults:
 
 - Code emails are sent only after a correct password, with a 60 s resend cooldown per device and app, at most 5 per user per hour and 50 per hour for the server.
-- Failed sign-ins are throttled per IP (10 per 5 minutes; IPv6 per /64) and, for sign-ins through the proxy, per user (10 per 15 minutes). Throttled attempts get 403.
+- Failed sign-ins are throttled per IP (10 per 5 minutes; IPv6 per /64) and, for sign-ins through the proxy, per user (10 per 15 minutes). Throttled attempts get 403. Administrators can see and clear the counters on the plugin page (**Failed sign-in throttles**). With [Let CrowdSec make the IP bans](troubleshooting.md#let-crowdsec-make-the-ip-bans), CrowdSec bans IPs instead and Jelly2FA keeps only a high per-IP backstop.
 - Counted as failures: wrong passwords, unknown codes, and wrong codes after a correct password. **Not** counted: a stale (recently issued) code, or a correct password without a pending code.
 - Direct LAN/Tailscale sign-ins are throttled per IP only, so failures from the internet cannot lock a user out of the LAN.
 - If a code email cannot be queued, that code is dropped (earlier codes stay valid).

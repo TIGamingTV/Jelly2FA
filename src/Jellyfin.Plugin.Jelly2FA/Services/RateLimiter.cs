@@ -112,6 +112,28 @@ public sealed class RateLimiter
         }
     }
 
+    /// <summary>Lists the keys starting with <paramref name="prefix"/> that have events within the window.</summary>
+    /// <param name="prefix">Key prefix (ordinal).</param>
+    /// <param name="window">Window used to prune old events.</param>
+    /// <returns>Key and event timestamps (oldest first) per key.</returns>
+    public IReadOnlyList<(string Key, DateTimeOffset[] Events)> Snapshot(string prefix, TimeSpan window)
+    {
+        lock (_lock)
+        {
+            var keys = _events.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+            var result = new List<(string Key, DateTimeOffset[] Events)>(keys.Count);
+            foreach (var key in keys)
+            {
+                if (CountInternal(key, window) > 0)
+                {
+                    result.Add((key, _events[key].ToArray()));
+                }
+            }
+
+            return result;
+        }
+    }
+
     private DateTimeOffset RecordInternal(string key, TimeSpan window)
     {
         CountInternal(key, window);
